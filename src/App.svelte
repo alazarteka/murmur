@@ -18,11 +18,70 @@
     TranscriptionCompletePayload
   } from './lib/types';
 
+  const FALLBACK_MODELS: ModelInfo[] = [
+    {
+      file_name: 'ggml-large-v3-turbo-q5_0.bin',
+      label: 'large-v3-turbo-q5_0',
+      quality: 'best balance',
+      installed: false,
+      active: false,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-large-v3-turbo.bin',
+      label: 'large-v3-turbo',
+      quality: 'highest quality (fast)',
+      installed: false,
+      active: false,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-large-v3.bin',
+      label: 'large-v3',
+      quality: 'highest quality',
+      installed: false,
+      active: false,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-medium.en.bin',
+      label: 'medium.en',
+      quality: 'high quality',
+      installed: false,
+      active: false,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-small.en.bin',
+      label: 'small.en',
+      quality: 'better than base',
+      installed: false,
+      active: false,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-base.en.bin',
+      label: 'base.en',
+      quality: 'balanced',
+      installed: false,
+      active: true,
+      download_url: null
+    },
+    {
+      file_name: 'ggml-tiny.en.bin',
+      label: 'tiny.en',
+      quality: 'fastest',
+      installed: false,
+      active: false,
+      download_url: null
+    }
+  ];
+
   let status: AppStatus = 'idle';
   let resultText = '';
   let history: HistoryEntry[] = [];
-  let models: ModelInfo[] = [];
-  let activeModel = '';
+  let models: ModelInfo[] = [...FALLBACK_MODELS];
+  let activeModel = 'ggml-base.en.bin';
   let errorMessage = '';
   let busy = false;
   let copiedState = '';
@@ -30,15 +89,29 @@
   let downloadPercent: number | null = null;
   let downloadingModel = '';
 
+  $: displayModels = models.length > 0 ? models : FALLBACK_MODELS;
+  $: activeModelInfo = displayModels.find((model) => model.file_name === activeModel) ?? null;
+
   const refreshHistory = async () => {
-    history = await getHistory(20);
+    try {
+      history = await getHistory(20);
+    } catch (error) {
+      errorMessage = `History failed: ${String(error)}`;
+    }
   };
 
   const refreshModels = async () => {
-    models = await listModels();
-    const active = models.find((model) => model.active);
-    if (active) {
-      activeModel = active.file_name;
+    try {
+      const remote = await listModels();
+      models = remote.length > 0 ? remote : [...FALLBACK_MODELS];
+      const active = models.find((model) => model.active);
+      if (active) {
+        activeModel = active.file_name;
+      }
+    } catch (error) {
+      models = [...FALLBACK_MODELS];
+      activeModel = 'ggml-base.en.bin';
+      errorMessage = `Model list failed: ${String(error)}`;
     }
   };
 
@@ -72,13 +145,16 @@
     await refreshHistory();
   };
 
-  const onModelChange = async () => {
-    if (!activeModel) return;
+  const onModelSelect = async (fileName: string) => {
+    if (modelBusy) return;
+    if (fileName === activeModel && activeModelInfo?.installed) return;
 
+    activeModel = fileName;
     modelBusy = true;
     errorMessage = '';
+
     try {
-      await setActiveModel(activeModel);
+      await setActiveModel(fileName);
       await refreshModels();
     } catch (error) {
       errorMessage = String(error);
@@ -90,6 +166,12 @@
         downloadingModel = '';
       }
     }
+  };
+
+  const onModelChange = async (event: Event) => {
+    const target = event.currentTarget as HTMLSelectElement | null;
+    if (!target) return;
+    await onModelSelect(target.value);
   };
 
   const onUseHistoryItem = async (text: string) => {
@@ -108,15 +190,30 @@
   };
 
   const formatTimestamp = (value: string): string => {
-    return value.replace('T', ' ');
+    const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+    const parsed = new Date(normalized);
+    if (Number.isNaN(parsed.getTime())) {
+      return value;
+    }
+    return parsed.toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
   };
 
   onMount(() => {
     let cleanup = () => {};
 
     const setup = async () => {
-      status = await getAppState();
-      await Promise.all([refreshHistory(), refreshModels()]);
+      try {
+        status = await getAppState();
+        await Promise.all([refreshHistory(), refreshModels()]);
+      } catch (error) {
+        errorMessage = String(error);
+        return;
+      }
 
       const unlistenStarted = await listen('recording-started', () => {
         status = 'recording';
@@ -184,25 +281,30 @@
 </script>
 
 <main class="workspace">
-  <header class="hero">
+  <header class="panel-header">
     <div>
       <h1>Murmur</h1>
-      <p>Press <strong>Ctrl+Shift+S</strong> to toggle recording. The app stays in your tray.</p>
+      <p>Use <strong>Ctrl+Shift+S</strong> to start and stop recording.</p>
     </div>
     <span class={`status-pill ${status}`}>{statusLabel(status)}</span>
   </header>
 
-  <section class="command-bar">
-    <button class="record-button" on:click={onToggle} disabled={busy}>
+  <section class="card controls">
+    <button class="record-button" on:click={onToggle} disabled={busy || modelBusy}>
       {status === 'recording' ? 'Stop Recording' : 'Start Recording'}
     </button>
 
-    <label class="model-picker">
+    <label class="model-field" for="model-select">
       <span>Model</span>
-      <select bind:value={activeModel} on:change={onModelChange} disabled={modelBusy}>
-        {#each models as model}
+      <select
+        id="model-select"
+        value={activeModel}
+        on:change={onModelChange}
+        disabled={modelBusy}
+      >
+        {#each displayModels as model}
           <option value={model.file_name}>
-            {model.label} · {model.quality}{model.installed ? '' : ' (not installed)'}
+            {model.label} - {model.quality}{model.installed ? '' : ' (download)'}
           </option>
         {/each}
       </select>
@@ -211,7 +313,11 @@
 
   {#if downloadPercent !== null}
     <section class="notice">
-      Downloading <strong>{downloadingModel}</strong>: {downloadPercent}%
+      <div class="notice-row">
+        <span>Downloading {downloadingModel}</span>
+        <strong>{downloadPercent}%</strong>
+      </div>
+      <progress max="100" value={downloadPercent}></progress>
     </section>
   {/if}
 
@@ -219,43 +325,41 @@
     <section class="error-banner">{errorMessage}</section>
   {/if}
 
-  <section class="content-grid">
-    <article class="card result-card">
-      <div class="row">
-        <h2>Result</h2>
-        <span class="chip">{copiedState || 'Clipboard ready'}</span>
-      </div>
-      <textarea bind:value={resultText} placeholder="Transcribed text appears here"></textarea>
-      <div class="actions">
-        <button on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
-        <button class="ghost" on:click={onDiscard}>Discard</button>
-      </div>
-    </article>
+  <section class="card result-card">
+    <div class="row">
+      <h2>Result</h2>
+      <span class="chip">{copiedState || 'Clipboard ready'}</span>
+    </div>
+    <textarea bind:value={resultText} placeholder="Transcribed text appears here"></textarea>
+    <div class="actions">
+      <button on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
+      <button class="ghost" on:click={onDiscard}>Discard</button>
+    </div>
+  </section>
 
-    <article class="card history-card">
-      <div class="row">
-        <h2>Recent</h2>
-        <button class="ghost" on:click={refreshHistory}>Refresh</button>
-      </div>
+  <section class="card history-card">
+    <div class="row">
+      <h2>Recent</h2>
+      <button class="ghost" on:click={refreshHistory}>Refresh</button>
+    </div>
 
-      {#if history.length === 0}
-        <p class="empty">No transcriptions yet.</p>
-      {:else}
-        <div class="history-list">
-          {#each history as item}
-            <article class="history-item">
-              <button class="history-text" on:click={() => onUseHistoryItem(item.text)}>
-                {item.text.slice(0, 180)}
-              </button>
-              <div class="history-meta">
-                <span>{formatTimestamp(item.created_at)}</span>
-                <span>{item.model}</span>
-                <button class="ghost danger" on:click={() => onDelete(item.id)}>Delete</button>
-              </div>
-            </article>
-          {/each}
-        </div>
-      {/if}
-    </article>
+    {#if history.length === 0}
+      <p class="empty">No transcriptions yet.</p>
+    {:else}
+      <div class="history-list">
+        {#each history as item}
+          <article class="history-item">
+            <button class="history-text" on:click={() => onUseHistoryItem(item.text)}>
+              {item.text.slice(0, 180)}
+            </button>
+            <div class="history-meta">
+              <span>{formatTimestamp(item.created_at)}</span>
+              <span>{item.model}</span>
+              <button class="ghost danger" on:click={() => onDelete(item.id)}>Delete</button>
+            </div>
+          </article>
+        {/each}
+      </div>
+    {/if}
   </section>
 </main>
