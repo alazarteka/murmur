@@ -5,9 +5,11 @@
     copyText,
     deleteTranscription,
     getAppState,
+    getHotkey,
     getHistory,
     listModels,
     setActiveModel,
+    setHotkey,
     toggleRecording
   } from './lib/api';
   import type {
@@ -88,9 +90,138 @@
   let modelBusy = false;
   let downloadPercent: number | null = null;
   let downloadingModel = '';
+  let hotkey = 'control+shift+KeyS';
+  let hotkeyBusy = false;
+  let rebindingHotkey = false;
+  let hotkeyMessage = '';
+  let hotkeyCaptureCleanup: (() => void) | null = null;
 
   $: displayModels = models.length > 0 ? models : FALLBACK_MODELS;
   $: activeModelInfo = displayModels.find((model) => model.file_name === activeModel) ?? null;
+  $: hotkeyTokens = formatHotkeyTokens(hotkey);
+
+  const modelShortName = (fileName: string): string =>
+    fileName.replace(/^ggml-/, '').replace(/\.bin$/, '');
+
+  const formatHotkeyTokens = (shortcut: string): string[] => {
+    const tokens = shortcut.split('+').map((part) => part.trim()).filter(Boolean);
+    return tokens.map((token) => {
+      const normalized = token.toLowerCase();
+      if (normalized === 'control' || normalized === 'ctrl') return '⌃';
+      if (normalized === 'shift') return '⇧';
+      if (normalized === 'alt' || normalized === 'option') return '⌥';
+      if (normalized === 'super' || normalized === 'command' || normalized === 'cmd') return '⌘';
+      if (normalized.startsWith('key') && token.length === 4) return token[3]?.toUpperCase() ?? token;
+      if (normalized.startsWith('digit') && token.length === 6) return token[5] ?? token;
+      return token;
+    });
+  };
+
+  const hotkeyFromEvent = (event: KeyboardEvent): string | null => {
+    const ignored = new Set([
+      'ControlLeft',
+      'ControlRight',
+      'ShiftLeft',
+      'ShiftRight',
+      'AltLeft',
+      'AltRight',
+      'MetaLeft',
+      'MetaRight'
+    ]);
+
+    if (ignored.has(event.code)) return null;
+
+    let keyToken: string | null = null;
+    if (event.code.startsWith('Key') || event.code.startsWith('Digit')) {
+      keyToken = event.code;
+    } else if (/^F\d{1,2}$/.test(event.code)) {
+      keyToken = event.code;
+    } else {
+      const mapped: Record<string, string> = {
+        Space: 'Space',
+        Minus: 'Minus',
+        Equal: 'Equal',
+        Comma: 'Comma',
+        Period: 'Period',
+        Semicolon: 'Semicolon',
+        Quote: 'Quote',
+        Slash: 'Slash',
+        Backslash: 'Backslash',
+        Backquote: 'Backquote',
+        BracketLeft: 'BracketLeft',
+        BracketRight: 'BracketRight'
+      };
+      keyToken = mapped[event.code] ?? null;
+    }
+
+    if (!keyToken) return null;
+
+    const parts: string[] = [];
+    if (event.ctrlKey) parts.push('control');
+    if (event.shiftKey) parts.push('shift');
+    if (event.altKey) parts.push('alt');
+    if (event.metaKey) parts.push('super');
+    if (parts.length === 0) return null;
+
+    parts.push(keyToken);
+    return parts.join('+');
+  };
+
+  const stopHotkeyCapture = () => {
+    if (hotkeyCaptureCleanup) {
+      hotkeyCaptureCleanup();
+      hotkeyCaptureCleanup = null;
+    }
+    rebindingHotkey = false;
+  };
+
+  const startHotkeyCapture = () => {
+    if (rebindingHotkey || hotkeyBusy) return;
+
+    hotkeyMessage = '';
+    rebindingHotkey = true;
+
+    const onKeyDown = async (event: KeyboardEvent) => {
+      if (!rebindingHotkey || event.repeat) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (event.key === 'Escape') {
+        stopHotkeyCapture();
+        return;
+      }
+
+      const nextHotkey = hotkeyFromEvent(event);
+      if (!nextHotkey) {
+        hotkeyMessage = 'Press one non-modifier key with Ctrl/Shift/Alt/Cmd.';
+        return;
+      }
+
+      hotkeyBusy = true;
+      try {
+        hotkey = await setHotkey(nextHotkey);
+        hotkeyMessage = '';
+      } catch (error) {
+        hotkeyMessage = `Hotkey update failed: ${String(error)}`;
+      } finally {
+        hotkeyBusy = false;
+        stopHotkeyCapture();
+      }
+    };
+
+    const onBlur = () => {
+      stopHotkeyCapture();
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('blur', onBlur, true);
+
+    hotkeyCaptureCleanup = () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('blur', onBlur, true);
+    };
+  };
 
   const refreshHistory = async () => {
     try {
@@ -208,7 +339,9 @@
 
     const setup = async () => {
       try {
-        status = await getAppState();
+        const [nextStatus, nextHotkey] = await Promise.all([getAppState(), getHotkey()]);
+        status = nextStatus;
+        hotkey = nextHotkey;
         await Promise.all([refreshHistory(), refreshModels()]);
       } catch (error) {
         errorMessage = String(error);
@@ -265,13 +398,19 @@
         }
       );
 
+      const unlistenHotkeyUpdated = await listen<{ hotkey: string }>('hotkey-updated', (event) => {
+        hotkey = event.payload.hotkey;
+      });
+
       cleanup = () => {
+        stopHotkeyCapture();
         unlistenStarted();
         unlistenStopped();
         unlistenCompleted();
         unlistenError();
         unlistenModelProgress();
         unlistenModelComplete();
+        unlistenHotkeyUpdated();
       };
     };
 
@@ -280,96 +419,152 @@
   });
 </script>
 
-<main class="workspace">
-  <header class="panel-header">
-    <div>
-      <h1>Murmur</h1>
-      <p>Tray dictation with local transcription.</p>
+<main class="window">
+
+  <!-- ── Toolbar ─────────────────────────────────── -->
+  <header class="toolbar">
+    <div class="toolbar-info">
+      <h1 class="app-name">Murmur</h1>
+      <p class="app-sub">Local speech-to-text</p>
     </div>
-    <span class={`status-pill ${status}`}>{statusLabel(status)}</span>
+    <span class={`status-badge ${status}`}>
+      <span class="status-dot"></span>
+      {statusLabel(status)}
+    </span>
   </header>
 
-  <section class="card controls">
-    <div class="quick-row">
-      <button class="record-button" on:click={onToggle} disabled={busy || modelBusy}>
-        <span class={`record-dot ${status}`}></span>
-        {status === 'recording' ? 'Stop Recording' : 'Start Recording'}
-      </button>
-      <span class="hotkey-pill">Ctrl+Shift+S</span>
-    </div>
+  <div class="sep"></div>
 
-    <label class="model-field" for="model-select">
-      <span>Model</span>
-      <select
-        id="model-select"
-        value={activeModel}
-        on:change={onModelChange}
-        disabled={modelBusy}
+  <!-- ── Content ─────────────────────────────────── -->
+  <div class="content">
+
+    <!-- Record -->
+    <div class="record-section">
+      <button
+        class={`record-btn${status === 'recording' ? ' is-recording' : ''}${status === 'processing' ? ' is-processing' : ''}`}
+        on:click={onToggle}
+        disabled={busy || modelBusy || status === 'processing'}
       >
-        {#each displayModels as model}
-          <option value={model.file_name}>
-            {model.label} - {model.quality}{model.installed ? '' : ' (download)'}
-          </option>
+        <span class="btn-dot"></span>
+        {#if status === 'recording'}
+          Stop Recording
+        {:else if status === 'processing'}
+          Transcribing…
+        {:else}
+          Start Recording
+        {/if}
+      </button>
+
+      <div class="hotkey-row">
+        {#each hotkeyTokens as token}
+          <span class="kbd">{token}</span>
         {/each}
-      </select>
-    </label>
-    {#if activeModelInfo}
-      <p class="model-meta">
-        Active: <strong>{activeModelInfo.label}</strong>
-        <span>{activeModelInfo.quality}</span>
-      </p>
-    {/if}
-  </section>
-
-  {#if downloadPercent !== null}
-    <section class="notice">
-      <div class="notice-row">
-        <span>Downloading {downloadingModel}</span>
-        <strong>{downloadPercent}%</strong>
+        <button
+          class="btn-inline hotkey-change"
+          on:click={startHotkeyCapture}
+          disabled={hotkeyBusy || rebindingHotkey || status !== 'idle'}
+        >
+          {rebindingHotkey ? 'Press keys…' : 'Change'}
+        </button>
       </div>
-      <progress max="100" value={downloadPercent}></progress>
-    </section>
-  {/if}
-
-  {#if errorMessage}
-    <section class="error-banner">{errorMessage}</section>
-  {/if}
-
-  <section class="card result-card">
-    <div class="row">
-      <h2>Result</h2>
-      <span class="chip">{copiedState || 'Clipboard ready'}</span>
-    </div>
-    <textarea bind:value={resultText} placeholder="Transcribed text appears here"></textarea>
-    <div class="actions">
-      <button on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
-      <button class="ghost" on:click={onDiscard}>Discard</button>
-    </div>
-  </section>
-
-  <section class="card history-card">
-    <div class="row">
-      <h2>Recent</h2>
-      <button class="ghost" on:click={refreshHistory}>Refresh</button>
+      {#if hotkeyMessage}
+        <p class="hotkey-error">{hotkeyMessage}</p>
+      {:else if rebindingHotkey}
+        <p class="hotkey-hint">Press your new shortcut, or Esc to cancel.</p>
+      {/if}
     </div>
 
-    {#if history.length === 0}
-      <p class="empty">No transcriptions yet.</p>
-    {:else}
-      <div class="history-list">
-        {#each history as item}
-          <article class="history-item">
-            <button class="history-text" on:click={() => onUseHistoryItem(item.text)}>
-              {item.text.slice(0, 180)}
-            </button>
-            <div class="history-meta">
-              <span>{formatTimestamp(item.created_at)}</span>
-              <span>{item.model}</span>
-              <button class="ghost danger" on:click={() => onDelete(item.id)}>Delete</button>
+    <div class="sep"></div>
+
+    <!-- Model -->
+    <div class="form-section">
+      <label class="field-label" for="model-select">Model</label>
+      <div class="select-wrap">
+        <select
+          id="model-select"
+          value={activeModel}
+          on:change={onModelChange}
+          disabled={modelBusy}
+        >
+          {#each displayModels as model}
+            <option value={model.file_name}>
+              {model.label} — {model.quality}{model.installed ? '' : ' ↓'}
+            </option>
+          {/each}
+        </select>
+        <span class="chevron">▾</span>
+      </div>
+      {#if activeModelInfo}
+        <p class="model-caption">
+          {activeModelInfo.label} · {activeModelInfo.quality}{#if !activeModelInfo.installed} · <em>not installed</em>{/if}
+        </p>
+      {/if}
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Download progress -->
+    {#if downloadPercent !== null}
+      <div class="notice-band info">
+        <div class="notice-row">
+          <span>Downloading {modelShortName(downloadingModel)}</span>
+          <strong>{downloadPercent}%</strong>
+        </div>
+        <progress max="100" value={downloadPercent}></progress>
+      </div>
+      <div class="sep"></div>
+    {/if}
+
+    <!-- Error -->
+    {#if errorMessage}
+      <div class="notice-band error">{errorMessage}</div>
+      <div class="sep"></div>
+    {/if}
+
+    <!-- Result -->
+    <div class="result-section">
+      <div class="section-header">
+        <span class="section-label">Result</span>
+        <span class={`copied-tag${copiedState ? ' show' : ''}`}>✓ Copied</span>
+      </div>
+      <textarea bind:value={resultText} placeholder="Transcribed text appears here…"></textarea>
+      <div class="action-row">
+        <button class="btn-primary" on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
+        <button class="btn-secondary" on:click={onDiscard}>Discard</button>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- History -->
+    <div class="history-section">
+      <div class="section-header">
+        <span class="section-label">Recent</span>
+        <button class="btn-inline" on:click={refreshHistory}>Refresh</button>
+      </div>
+
+      {#if history.length === 0}
+        <p class="empty-msg">No transcriptions yet.</p>
+      {:else}
+        <div class="history-list">
+          {#each history as item}
+            <div class="history-item">
+              <button class="history-text-btn" on:click={() => onUseHistoryItem(item.text)}>
+                {item.text.slice(0, 180)}
+              </button>
+              <div class="history-meta-row">
+                <div class="history-meta-info">
+                  <span>{formatTimestamp(item.created_at)}</span>
+                  <span class="dot-sep"></span>
+                  <span>{modelShortName(item.model)}</span>
+                </div>
+                <button class="btn-del" on:click={() => onDelete(item.id)}>✕</button>
+              </div>
             </div>
-          </article>
-        {/each}
-      </div>
-    {/if}
-  </section>
+          {/each}
+        </div>
+      {/if}
+    </div>
+
+  </div>
 </main>

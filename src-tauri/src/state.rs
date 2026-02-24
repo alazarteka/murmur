@@ -1,4 +1,5 @@
 use crate::audio::RecordingSession;
+use crate::settings;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -21,11 +22,19 @@ pub struct SharedState {
     inner: Arc<Mutex<Inner>>,
     db_path: Arc<PathBuf>,
     models_dir: Arc<PathBuf>,
+    settings_path: Arc<PathBuf>,
     active_model: Arc<RwLock<String>>,
+    hotkey: Arc<RwLock<String>>,
 }
 
 impl SharedState {
-    pub fn new(db_path: PathBuf, models_dir: PathBuf, active_model: String) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        models_dir: PathBuf,
+        settings_path: PathBuf,
+        active_model: String,
+        hotkey: String,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 status: AppStatus::Idle,
@@ -33,7 +42,9 @@ impl SharedState {
             })),
             db_path: Arc::new(db_path),
             models_dir: Arc::new(models_dir),
+            settings_path: Arc::new(settings_path),
             active_model: Arc::new(RwLock::new(active_model)),
+            hotkey: Arc::new(RwLock::new(hotkey)),
         }
     }
 
@@ -76,6 +87,34 @@ impl SharedState {
 
     pub fn models_dir(&self) -> PathBuf {
         (*self.models_dir).clone()
+    }
+
+    pub fn hotkey(&self) -> String {
+        self.hotkey
+            .read()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| settings::DEFAULT_HOTKEY.to_string())
+    }
+
+    pub fn set_hotkey(&self, hotkey: String) -> Result<(), String> {
+        let previous = self.hotkey();
+
+        {
+            let mut guard = self
+                .hotkey
+                .write()
+                .map_err(|_| "Hotkey lock poisoned".to_string())?;
+            *guard = hotkey.clone();
+        }
+
+        if let Err(err) = settings::save_hotkey(self.settings_path.as_ref().as_path(), &hotkey) {
+            if let Ok(mut guard) = self.hotkey.write() {
+                *guard = previous;
+            }
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     pub fn active_model_name(&self) -> String {

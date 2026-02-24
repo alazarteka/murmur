@@ -1,12 +1,15 @@
 use crate::audio;
 use crate::db;
 use crate::models;
+use crate::settings;
 use crate::state::{AppStatus, SharedState};
 use crate::whisper;
 use anyhow::Result;
 use serde::Serialize;
+use std::str::FromStr;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut};
 
 #[derive(Debug, Clone, Serialize)]
 struct ErrorPayload {
@@ -30,6 +33,11 @@ struct ModelDownloadProgressPayload {
 #[derive(Debug, Clone, Serialize)]
 struct ModelDownloadCompletePayload {
     file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HotkeyUpdatedPayload {
+    hotkey: String,
 }
 
 #[tauri::command]
@@ -83,6 +91,20 @@ pub fn list_models(state: State<'_, SharedState>) -> Result<Vec<models::ModelInf
 }
 
 #[tauri::command]
+pub fn get_hotkey(state: State<'_, SharedState>) -> String {
+    state.hotkey()
+}
+
+#[tauri::command]
+pub fn set_hotkey(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    hotkey: String,
+) -> Result<String, String> {
+    set_hotkey_impl(app, state.inner().clone(), hotkey).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn set_active_model(
     app: AppHandle,
     state: State<'_, SharedState>,
@@ -124,6 +146,57 @@ pub async fn set_active_model(
     state
         .set_active_model(file_name)
         .map_err(|err| err.to_string())
+}
+
+fn set_hotkey_impl(app: AppHandle, state: SharedState, hotkey: String) -> Result<String> {
+    let new_shortcut = parse_hotkey(&hotkey)?;
+    let old_hotkey = state.hotkey();
+    let old_shortcut = parse_hotkey(&old_hotkey)
+        .or_else(|_| parse_hotkey(settings::DEFAULT_HOTKEY))
+        .map_err(|e| anyhow::anyhow!("Invalid current hotkey: {e}"))?;
+
+    if new_shortcut.id() == old_shortcut.id() {
+        let canonical = new_shortcut.to_string();
+        state
+            .set_hotkey(canonical.clone())
+            .map_err(|e| anyhow::anyhow!(e))?;
+        return Ok(canonical);
+    }
+
+    // Unregistering may fail if the old shortcut was not registered. Continue so
+    // users can recover by selecting a new valid shortcut.
+    let _ = app.global_shortcut().unregister(old_shortcut);
+
+    if let Err(err) = app.global_shortcut().register(new_shortcut) {
+        let _ = app.global_shortcut().register(old_shortcut);
+        anyhow::bail!("Failed to register hotkey (possibly used by another app): {err}");
+    }
+
+    let canonical = new_shortcut.to_string();
+    if let Err(err) = state.set_hotkey(canonical.clone()) {
+        let _ = app.global_shortcut().unregister(new_shortcut);
+        let _ = app.global_shortcut().register(old_shortcut);
+        anyhow::bail!(err);
+    }
+
+    let _ = app.emit(
+        "hotkey-updated",
+        HotkeyUpdatedPayload {
+            hotkey: canonical.clone(),
+        },
+    );
+
+    Ok(canonical)
+}
+
+fn parse_hotkey(raw: &str) -> Result<Shortcut> {
+    let shortcut =
+        Shortcut::from_str(raw.trim()).map_err(|e| anyhow::anyhow!("Invalid hotkey: {e}"))?;
+    let required_mods = Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER;
+    if !shortcut.mods.intersects(required_mods) {
+        anyhow::bail!("Hotkey must include at least one modifier key");
+    }
+    Ok(shortcut)
 }
 
 pub async fn toggle_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {

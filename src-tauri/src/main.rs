@@ -2,6 +2,7 @@ mod audio;
 mod commands;
 mod db;
 mod models;
+mod settings;
 mod state;
 mod whisper;
 
@@ -10,7 +11,7 @@ use std::fs;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{ActivationPolicy, AppHandle, Manager, RunEvent, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 fn main() {
     let app = tauri::Builder::default()
@@ -47,10 +48,19 @@ fn main() {
             let db_path = app_data.join("murmur.db");
             db::init(&db_path)?;
 
+            let settings_path = app_data.join("settings.json");
+            let settings = settings::load(&settings_path);
             let active_model = models::pick_default_model(&models_dir);
-            app.manage(state::SharedState::new(db_path, models_dir, active_model));
+            let hotkey = settings.hotkey.clone();
+            app.manage(state::SharedState::new(
+                db_path,
+                models_dir,
+                settings_path,
+                active_model,
+                hotkey.clone(),
+            ));
 
-            register_hotkey(app)?;
+            register_hotkey(app, &hotkey)?;
             setup_tray(app)?;
 
             if let Some(main_window) = app.get_webview_window("main") {
@@ -76,6 +86,8 @@ fn main() {
             commands::copy_text,
             commands::list_models,
             commands::set_active_model,
+            commands::get_hotkey,
+            commands::set_hotkey,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -88,8 +100,8 @@ fn main() {
     });
 }
 
-fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
+fn register_hotkey(app: &tauri::App, hotkey: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let shortcut: Shortcut = hotkey.parse()?;
     app.global_shortcut().register(shortcut)?;
     Ok(())
 }

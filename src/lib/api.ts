@@ -40,3 +40,7 @@ export const listModels = (): Promise<ModelInfo[]> => safeInvoke('list_models');
 
 export const setActiveModel = (fileName: string): Promise<void> =>
   safeInvoke('set_active_model', { fileName });
+
+export const getHotkey = (): Promise<string> => safeInvoke('get_hotkey');
+
+export const setHotkey = (hotkey: string): Promise<string> => safeInvoke('set_hotkey', { hotkey });
