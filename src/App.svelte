@@ -26,8 +26,9 @@
   let errorMessage = '';
   let busy = false;
   let copiedState = '';
-
-  $: selectedModel = models.find((model) => model.file_name === activeModel) ?? null;
+  let modelBusy = false;
+  let downloadPercent: number | null = null;
+  let downloadingModel = '';
 
   const refreshHistory = async () => {
     history = await getHistory(20);
@@ -72,15 +73,23 @@
   };
 
   const onModelChange = async () => {
-    const model = models.find((candidate) => candidate.file_name === activeModel);
-    if (!model || !model.installed) {
-      errorMessage = 'That model is not installed yet.';
-      return;
-    }
+    if (!activeModel) return;
 
-    await setActiveModel(activeModel);
-    await refreshModels();
+    modelBusy = true;
     errorMessage = '';
+    try {
+      await setActiveModel(activeModel);
+      await refreshModels();
+    } catch (error) {
+      errorMessage = String(error);
+      await refreshModels();
+    } finally {
+      modelBusy = false;
+      if (downloadPercent === null || downloadPercent >= 100) {
+        downloadPercent = null;
+        downloadingModel = '';
+      }
+    }
   };
 
   const onUseHistoryItem = async (text: string) => {
@@ -136,11 +145,36 @@
         errorMessage = event.payload.message;
       });
 
+      const unlistenModelProgress = await listen<{ file_name: string; percent: number }>(
+        'model-download-progress',
+        (event) => {
+          modelBusy = true;
+          downloadingModel = event.payload.file_name;
+          downloadPercent = event.payload.percent;
+        }
+      );
+
+      const unlistenModelComplete = await listen<{ file_name: string }>(
+        'model-download-complete',
+        async (event) => {
+          modelBusy = false;
+          downloadingModel = event.payload.file_name;
+          downloadPercent = 100;
+          await refreshModels();
+          window.setTimeout(() => {
+            downloadPercent = null;
+            downloadingModel = '';
+          }, 1200);
+        }
+      );
+
       cleanup = () => {
         unlistenStarted();
         unlistenStopped();
         unlistenCompleted();
         unlistenError();
+        unlistenModelProgress();
+        unlistenModelComplete();
       };
     };
 
@@ -165,9 +199,9 @@
 
     <label class="model-picker">
       <span>Model</span>
-      <select bind:value={activeModel} on:change={onModelChange}>
+      <select bind:value={activeModel} on:change={onModelChange} disabled={modelBusy}>
         {#each models as model}
-          <option value={model.file_name} disabled={!model.installed}>
+          <option value={model.file_name}>
             {model.label} · {model.quality}{model.installed ? '' : ' (not installed)'}
           </option>
         {/each}
@@ -175,10 +209,9 @@
     </label>
   </section>
 
-  {#if selectedModel && !selectedModel.installed && selectedModel.download_url}
+  {#if downloadPercent !== null}
     <section class="notice">
-      Install <strong>{selectedModel.label}</strong> here:
-      <a href={selectedModel.download_url} target="_blank" rel="noreferrer">{selectedModel.download_url}</a>
+      Downloading <strong>{downloadingModel}</strong>: {downloadPercent}%
     </section>
   {/if}
 

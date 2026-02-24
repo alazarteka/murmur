@@ -21,6 +21,17 @@ struct TranscriptionCompletePayload {
     model: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ModelDownloadProgressPayload {
+    file_name: String,
+    percent: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelDownloadCompletePayload {
+    file_name: String,
+}
+
 #[tauri::command]
 pub fn get_app_state(state: State<'_, SharedState>) -> AppStatus {
     state.status()
@@ -72,7 +83,44 @@ pub fn list_models(state: State<'_, SharedState>) -> Result<Vec<models::ModelInf
 }
 
 #[tauri::command]
-pub fn set_active_model(state: State<'_, SharedState>, file_name: String) -> Result<(), String> {
+pub async fn set_active_model(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    file_name: String,
+) -> Result<(), String> {
+    let model_path = state.models_dir().join(&file_name);
+
+    if !model_path.exists() {
+        let app_for_progress = app.clone();
+        let models_dir = state.models_dir();
+        let file_name_for_download = file_name.clone();
+
+        let download_result = tauri::async_runtime::spawn_blocking(move || {
+            let mut last_emitted: Option<u8> = None;
+            models::download_model(&models_dir, &file_name_for_download, |percent| {
+                if last_emitted == Some(percent) {
+                    return;
+                }
+                last_emitted = Some(percent);
+                let payload = ModelDownloadProgressPayload {
+                    file_name: file_name_for_download.clone(),
+                    percent,
+                };
+                let _ = app_for_progress.emit("model-download-progress", payload);
+            })
+        })
+        .await
+        .map_err(|err| format!("Model download task failed: {err}"))?;
+
+        download_result.map_err(|err| err.to_string())?;
+        let _ = app.emit(
+            "model-download-complete",
+            ModelDownloadCompletePayload {
+                file_name: file_name.clone(),
+            },
+        );
+    }
+
     state
         .set_active_model(file_name)
         .map_err(|err| err.to_string())

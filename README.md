@@ -9,7 +9,7 @@ Local-first menu bar speech-to-text app for macOS using Tauri + Svelte + Rust.
 - Whisper transcription through `whisper-rs`.
 - Auto-copy transcription to clipboard.
 - SQLite history (list + delete).
-- Editable result area and installed-model selector UI.
+- Editable result area and model selector UI with auto-download for known models.
 
 ## UI behavior
 
@@ -34,6 +34,7 @@ The app auto-picks the best installed model by preference:
 7. `ggml-tiny.en.bin`
 
 You can switch the active model from the UI dropdown.
+If the selected known model is missing, Murmur downloads it automatically and then activates it.
 
 ## Run locally
 

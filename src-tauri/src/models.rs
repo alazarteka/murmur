@@ -1,8 +1,11 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use reqwest::blocking::Client;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelInfo {
@@ -132,6 +135,85 @@ pub fn list_models(models_dir: &Path, active_model: &str) -> Result<Vec<ModelInf
     Ok(models)
 }
 
+pub fn download_model<F>(models_dir: &Path, file_name: &str, mut on_progress: F) -> Result<()>
+where
+    F: FnMut(u8),
+{
+    let known = find_known_model(file_name).ok_or_else(|| {
+        anyhow!(
+            "No auto-download URL known for model '{}'. Add the file manually to the models folder.",
+            file_name
+        )
+    })?;
+
+    fs::create_dir_all(models_dir)?;
+
+    let destination = models_dir.join(file_name);
+    if destination.exists() {
+        on_progress(100);
+        return Ok(());
+    }
+
+    let partial = models_dir.join(format!("{file_name}.part"));
+    let _ = fs::remove_file(&partial);
+
+    let result = (|| -> Result<()> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(60 * 30))
+            .build()?;
+
+        let mut response = client
+            .get(known.download_url)
+            .header("User-Agent", "murmur/0.1")
+            .send()?
+            .error_for_status()?;
+
+        let total_bytes = response.content_length();
+        let mut file = File::create(&partial)?;
+
+        let mut downloaded: u64 = 0;
+        let mut last_percent: u8 = 0;
+        let mut buffer = [0_u8; 64 * 1024];
+
+        on_progress(0);
+
+        loop {
+            let read = response.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+
+            file.write_all(&buffer[..read])?;
+            downloaded += read as u64;
+
+            if let Some(total) = total_bytes {
+                if total > 0 {
+                    let percent = ((downloaded.saturating_mul(100)) / total).min(100) as u8;
+                    if percent != last_percent {
+                        last_percent = percent;
+                        on_progress(percent);
+                    }
+                }
+            }
+        }
+
+        file.flush()?;
+        file.sync_all()?;
+
+        fs::rename(&partial, &destination)?;
+        on_progress(100);
+
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+
+    result
+}
+
 fn read_installed_model_files(models_dir: &Path) -> Result<Vec<String>> {
     let mut files = Vec::new();
     if !models_dir.exists() {
@@ -156,4 +238,10 @@ fn read_installed_model_files(models_dir: &Path) -> Result<Vec<String>> {
 
     files.sort();
     Ok(files)
+}
+
+fn find_known_model(file_name: &str) -> Option<&'static KnownModel> {
+    KNOWN_MODELS
+        .iter()
+        .find(|model| model.file_name == file_name)
 }
