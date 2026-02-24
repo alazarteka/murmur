@@ -284,15 +284,19 @@
   <header class="panel-header">
     <div>
       <h1>Murmur</h1>
-      <p>Use <strong>Ctrl+Shift+S</strong> to start and stop recording.</p>
+      <p>Tray dictation with local transcription.</p>
     </div>
     <span class={`status-pill ${status}`}>{statusLabel(status)}</span>
   </header>
 
   <section class="card controls">
-    <button class="record-button" on:click={onToggle} disabled={busy || modelBusy}>
-      {status === 'recording' ? 'Stop Recording' : 'Start Recording'}
-    </button>
+    <div class="quick-row">
+      <button class="record-button" on:click={onToggle} disabled={busy || modelBusy}>
+        <span class={`record-dot ${status}`}></span>
+        {status === 'recording' ? 'Stop Recording' : 'Start Recording'}
+      </button>
+      <span class="hotkey-pill">Ctrl+Shift+S</span>
+    </div>
 
     <label class="model-field" for="model-select">
       <span>Model</span>
@@ -309,6 +313,12 @@
         {/each}
       </select>
     </label>
+    {#if activeModelInfo}
+      <p class="model-meta">
+        Active: <strong>{activeModelInfo.label}</strong>
+        <span>{activeModelInfo.quality}</span>
+      </p>
+    {/if}
   </section>
 
   {#if downloadPercent !== null}
