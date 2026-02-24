@@ -15,12 +15,15 @@
       {
         "label": "main",
         "title": "Murmur",
-        "width": 360,
-        "height": 560,
-        "resizable": false,
+        "width": 760,
+        "height": 620,
+        "minWidth": 640,
+        "minHeight": 520,
+        "resizable": true,
         "fullscreen": false,
         "visible": false,
-        "alwaysOnTop": true
+        "alwaysOnTop": false,
+        "center": true
       }
     ],
     "security": {

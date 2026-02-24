@@ -8,6 +8,15 @@ export interface HistoryEntry {
   model: string;
 }
 
+export interface ModelInfo {
+  file_name: string;
+  label: string;
+  quality: string;
+  installed: boolean;
+  active: boolean;
+  download_url: string | null;
+}
+
 export interface TranscriptionCompletePayload {
   id: number;
   text: string;

@@ -1,6 +1,7 @@
 mod audio;
 mod commands;
 mod db;
+mod models;
 mod state;
 mod whisper;
 
@@ -36,13 +37,15 @@ fn main() {
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data)?;
-            fs::create_dir_all(app_data.join("models"))?;
+
+            let models_dir = app_data.join("models");
+            fs::create_dir_all(&models_dir)?;
 
             let db_path = app_data.join("murmur.db");
             db::init(&db_path)?;
 
-            let model_path = app_data.join("models").join("ggml-base.en.bin");
-            app.manage(state::SharedState::new(db_path, model_path));
+            let active_model = models::pick_default_model(&models_dir);
+            app.manage(state::SharedState::new(db_path, models_dir, active_model));
 
             register_hotkey(app)?;
             setup_tray(app)?;
@@ -61,6 +64,8 @@ fn main() {
             commands::get_history,
             commands::delete_transcription,
             commands::copy_text,
+            commands::list_models,
+            commands::set_active_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -73,14 +78,14 @@ fn register_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let settings_item = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
+    let open_item = MenuItem::with_id(app, "open", "Open Murmur", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Murmur", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
     TrayIconBuilder::new()
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "settings" => show_window(app),
+            "open" => show_window(app),
             "quit" => app.exit(0),
             _ => {}
         })

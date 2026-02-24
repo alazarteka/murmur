@@ -1,10 +1,11 @@
 use crate::audio;
 use crate::db;
+use crate::models;
 use crate::state::{AppStatus, SharedState};
 use crate::whisper;
 use anyhow::Result;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +66,18 @@ pub fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to copy text: {e}"))
 }
 
+#[tauri::command]
+pub fn list_models(state: State<'_, SharedState>) -> Result<Vec<models::ModelInfo>, String> {
+    models::list_models(&state.models_dir(), &state.active_model_name()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_active_model(state: State<'_, SharedState>, file_name: String) -> Result<(), String> {
+    state
+        .set_active_model(file_name)
+        .map_err(|err| err.to_string())
+}
+
 pub async fn toggle_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
     match state.status() {
         AppStatus::Idle => {
@@ -77,7 +90,6 @@ pub async fn toggle_recording_impl(app: AppHandle, state: SharedState) -> Result
 }
 
 pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
-    show_panel(app);
     let payload = ErrorPayload {
         message: message.into(),
     };
@@ -89,7 +101,6 @@ fn start_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
     state
         .set_recording(session)
         .map_err(|e| anyhow::anyhow!(e))?;
-    show_panel(&app);
     let _ = app.emit("recording-started", ());
     Ok(())
 }
@@ -107,7 +118,8 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
         }
 
         let db_path = state.db_path();
-        let model_path = state.model_path();
+        let model_path = state.active_model_path();
+        let model_name = state.active_model_name();
 
         let transcription = tauri::async_runtime::spawn_blocking(move || {
             whisper::transcribe(&model_path, &captured.samples, captured.sample_rate)
@@ -122,8 +134,7 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             text.trim().to_string()
         };
 
-        let model = "base.en";
-        let id = db::insert(&db_path, &normalized, duration_ms, model)?;
+        let id = db::insert(&db_path, &normalized, duration_ms, &model_name)?;
 
         app.clipboard().write_text(normalized.clone())?;
 
@@ -131,9 +142,8 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             id,
             text: normalized,
             duration_ms,
-            model: model.to_string(),
+            model: model_name,
         };
-        show_panel(&app);
         let _ = app.emit("transcription-complete", payload);
         Ok(())
     }
@@ -144,11 +154,4 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
         emit_error(&app, err.to_string());
     }
     result
-}
-
-fn show_panel(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
 }

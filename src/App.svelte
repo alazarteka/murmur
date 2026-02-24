@@ -6,23 +6,39 @@
     deleteTranscription,
     getAppState,
     getHistory,
+    listModels,
+    setActiveModel,
     toggleRecording
   } from './lib/api';
   import type {
     AppStatus,
     ErrorPayload,
     HistoryEntry,
+    ModelInfo,
     TranscriptionCompletePayload
   } from './lib/types';
 
   let status: AppStatus = 'idle';
   let resultText = '';
   let history: HistoryEntry[] = [];
+  let models: ModelInfo[] = [];
+  let activeModel = '';
   let errorMessage = '';
   let busy = false;
+  let copiedState = '';
+
+  $: selectedModel = models.find((model) => model.file_name === activeModel) ?? null;
 
   const refreshHistory = async () => {
-    history = await getHistory(15);
+    history = await getHistory(20);
+  };
+
+  const refreshModels = async () => {
+    models = await listModels();
+    const active = models.find((model) => model.active);
+    if (active) {
+      activeModel = active.file_name;
+    }
   };
 
   const onToggle = async () => {
@@ -40,6 +56,10 @@
   const onCopy = async () => {
     if (!resultText.trim()) return;
     await copyText(resultText);
+    copiedState = 'Copied';
+    window.setTimeout(() => {
+      copiedState = '';
+    }, 1200);
   };
 
   const onDiscard = () => {
@@ -51,10 +71,35 @@
     await refreshHistory();
   };
 
+  const onModelChange = async () => {
+    const model = models.find((candidate) => candidate.file_name === activeModel);
+    if (!model || !model.installed) {
+      errorMessage = 'That model is not installed yet.';
+      return;
+    }
+
+    await setActiveModel(activeModel);
+    await refreshModels();
+    errorMessage = '';
+  };
+
+  const onUseHistoryItem = async (text: string) => {
+    resultText = text;
+    await copyText(text);
+    copiedState = 'Copied';
+    window.setTimeout(() => {
+      copiedState = '';
+    }, 1200);
+  };
+
   const statusLabel = (current: AppStatus): string => {
     if (current === 'recording') return 'Recording';
     if (current === 'processing') return 'Transcribing';
     return 'Idle';
+  };
+
+  const formatTimestamp = (value: string): string => {
+    return value.replace('T', ' ');
   };
 
   onMount(() => {
@@ -62,7 +107,7 @@
 
     const setup = async () => {
       status = await getAppState();
-      await refreshHistory();
+      await Promise.all([refreshHistory(), refreshModels()]);
 
       const unlistenStarted = await listen('recording-started', () => {
         status = 'recording';
@@ -78,8 +123,11 @@
         async (event) => {
           status = 'idle';
           resultText = event.payload.text;
-          await copyText(resultText);
+          copiedState = 'Copied';
           await refreshHistory();
+          window.setTimeout(() => {
+            copiedState = '';
+          }, 1200);
         }
       );
 
@@ -101,53 +149,80 @@
   });
 </script>
 
-<main class="panel">
-  <section class="card">
-    <div class="row">
-      <strong>Press Ctrl+Shift+S</strong>
-      <span class={`status-dot ${status}`}></span>
+<main class="workspace">
+  <header class="hero">
+    <div>
+      <h1>Murmur</h1>
+      <p>Press <strong>Ctrl+Shift+S</strong> to toggle recording. The app stays in your tray.</p>
     </div>
-    <p>{statusLabel(status)}</p>
-    <div class="row">
-      <button on:click={onToggle} disabled={busy}>
-        {status === 'recording' ? 'Stop' : 'Record'}
-      </button>
-    </div>
+    <span class={`status-pill ${status}`}>{statusLabel(status)}</span>
+  </header>
+
+  <section class="command-bar">
+    <button class="record-button" on:click={onToggle} disabled={busy}>
+      {status === 'recording' ? 'Stop Recording' : 'Start Recording'}
+    </button>
+
+    <label class="model-picker">
+      <span>Model</span>
+      <select bind:value={activeModel} on:change={onModelChange}>
+        {#each models as model}
+          <option value={model.file_name} disabled={!model.installed}>
+            {model.label} · {model.quality}{model.installed ? '' : ' (not installed)'}
+          </option>
+        {/each}
+      </select>
+    </label>
   </section>
 
-  {#if errorMessage}
-    <section class="card error">{errorMessage}</section>
+  {#if selectedModel && !selectedModel.installed && selectedModel.download_url}
+    <section class="notice">
+      Install <strong>{selectedModel.label}</strong> here:
+      <a href={selectedModel.download_url} target="_blank" rel="noreferrer">{selectedModel.download_url}</a>
+    </section>
   {/if}
 
-  <section class="card">
-    <div class="row">
-      <strong>Result</strong>
-      <small>Editable</small>
-    </div>
-    <textarea bind:value={resultText} placeholder="Transcribed text appears here"></textarea>
-    <div class="row">
-      <button on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
-      <button class="secondary" on:click={onDiscard}>Discard</button>
-    </div>
-  </section>
+  {#if errorMessage}
+    <section class="error-banner">{errorMessage}</section>
+  {/if}
 
-  <section class="card history">
-    <div class="row">
-      <strong>Recent</strong>
-      <button class="secondary" on:click={refreshHistory}>Refresh</button>
-    </div>
-    {#if history.length === 0}
-      <p class="meta">No transcriptions yet.</p>
-    {:else}
-      {#each history as item}
-        <article class="history-item">
-          <div class="preview">{item.text.slice(0, 160)}</div>
-          <div class="row meta">
-            <span>{item.created_at}</span>
-            <button class="secondary" on:click={() => onDelete(item.id)}>Delete</button>
-          </div>
-        </article>
-      {/each}
-    {/if}
+  <section class="content-grid">
+    <article class="card result-card">
+      <div class="row">
+        <h2>Result</h2>
+        <span class="chip">{copiedState || 'Clipboard ready'}</span>
+      </div>
+      <textarea bind:value={resultText} placeholder="Transcribed text appears here"></textarea>
+      <div class="actions">
+        <button on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
+        <button class="ghost" on:click={onDiscard}>Discard</button>
+      </div>
+    </article>
+
+    <article class="card history-card">
+      <div class="row">
+        <h2>Recent</h2>
+        <button class="ghost" on:click={refreshHistory}>Refresh</button>
+      </div>
+
+      {#if history.length === 0}
+        <p class="empty">No transcriptions yet.</p>
+      {:else}
+        <div class="history-list">
+          {#each history as item}
+            <article class="history-item">
+              <button class="history-text" on:click={() => onUseHistoryItem(item.text)}>
+                {item.text.slice(0, 180)}
+              </button>
+              <div class="history-meta">
+                <span>{formatTimestamp(item.created_at)}</span>
+                <span>{item.model}</span>
+                <button class="ghost danger" on:click={() => onDelete(item.id)}>Delete</button>
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/if}
+    </article>
   </section>
 </main>

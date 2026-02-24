@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppStatus, HistoryEntry } from './types';
+import type { AppStatus, HistoryEntry, ModelInfo } from './types';
 
 export const startRecording = (): Promise<void> => invoke('start_recording');
 export const stopRecording = (): Promise<void> => invoke('stop_recording');
@@ -14,3 +14,8 @@ export const copyText = (text: string): Promise<void> => invoke('copy_text', { t
 
 export const deleteTranscription = (id: number): Promise<void> =>
   invoke('delete_transcription', { id });
+
+export const listModels = (): Promise<ModelInfo[]> => invoke('list_models');
+
+export const setActiveModel = (fileName: string): Promise<void> =>
+  invoke('set_active_model', { file_name: fileName });

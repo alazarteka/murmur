@@ -20,7 +20,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
 thiserror = "1"
-whisper-rs = "0.12"
+whisper-rs = { version = "0.12", features = ["metal"] }
 
 [features]
 default = ["custom-protocol"]
