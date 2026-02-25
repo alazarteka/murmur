@@ -257,6 +257,38 @@ body {
   color: var(--red);
 }
 
+.auto-copy-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 9px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--label-2);
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--blue);
+}
+
+.checkbox-row input:disabled {
+  opacity: 0.6;
+}
+
+.audio-hint {
+  margin: 7px 0 0;
+  font-size: 11px;
+  text-align: center;
+  color: var(--label-2);
+}
+
 /* ── Form Section (Model) ─────────────────────────── */
 .form-section {
   padding: 11px 16px 13px;

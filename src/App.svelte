@@ -4,19 +4,24 @@
   import {
     copyText,
     deleteTranscription,
+    getAudioInputStatus,
     getAppState,
+    getAutoCopy,
     getHotkey,
     getHistory,
     listModels,
+    setAutoCopy,
     setActiveModel,
     setHotkey,
     toggleRecording
   } from './lib/api';
   import type {
     AppStatus,
+    AudioInputStatus,
     ErrorPayload,
     HistoryEntry,
     ModelInfo,
+    NoticePayload,
     TranscriptionCompletePayload
   } from './lib/types';
 
@@ -95,6 +100,11 @@
   let rebindingHotkey = false;
   let hotkeyMessage = '';
   let hotkeyCaptureCleanup: (() => void) | null = null;
+  let autoCopy = false;
+  let autoCopyBusy = false;
+  let noticeMessage = '';
+  let audioStatus: AudioInputStatus | null = null;
+  let noticeTimer: number | null = null;
 
   $: displayModels = models.length > 0 ? models : FALLBACK_MODELS;
   $: activeModelInfo = displayModels.find((model) => model.file_name === activeModel) ?? null;
@@ -173,6 +183,35 @@
       hotkeyCaptureCleanup = null;
     }
     rebindingHotkey = false;
+  };
+
+  const setNotice = (message: string) => {
+    noticeMessage = message;
+    if (noticeTimer !== null) {
+      window.clearTimeout(noticeTimer);
+      noticeTimer = null;
+    }
+    noticeTimer = window.setTimeout(() => {
+      noticeMessage = '';
+      noticeTimer = null;
+    }, 5000);
+  };
+
+  const onAutoCopyToggle = async (event: Event) => {
+    const target = event.currentTarget as HTMLInputElement | null;
+    if (!target) return;
+
+    const next = target.checked;
+    autoCopyBusy = true;
+    errorMessage = '';
+    try {
+      autoCopy = await setAutoCopy(next);
+    } catch (error) {
+      autoCopy = !next;
+      errorMessage = `Auto-copy update failed: ${String(error)}`;
+    } finally {
+      autoCopyBusy = false;
+    }
   };
 
   const startHotkeyCapture = () => {
@@ -339,9 +378,19 @@
 
     const setup = async () => {
       try {
-        const [nextStatus, nextHotkey] = await Promise.all([getAppState(), getHotkey()]);
+        const [nextStatus, nextHotkey, nextAutoCopy, nextAudioStatus] = await Promise.all([
+          getAppState(),
+          getHotkey(),
+          getAutoCopy(),
+          getAudioInputStatus()
+        ]);
         status = nextStatus;
         hotkey = nextHotkey;
+        autoCopy = nextAutoCopy;
+        audioStatus = nextAudioStatus;
+        if (!nextAudioStatus.ok && nextAudioStatus.message) {
+          setNotice(nextAudioStatus.message);
+        }
         await Promise.all([refreshHistory(), refreshModels()]);
       } catch (error) {
         errorMessage = String(error);
@@ -362,11 +411,13 @@
         async (event) => {
           status = 'idle';
           resultText = event.payload.text;
-          copiedState = 'Copied';
+          copiedState = event.payload.auto_copied ? 'Copied' : '';
           await refreshHistory();
-          window.setTimeout(() => {
-            copiedState = '';
-          }, 1200);
+          if (event.payload.auto_copied) {
+            window.setTimeout(() => {
+              copiedState = '';
+            }, 1200);
+          }
         }
       );
 
@@ -402,8 +453,23 @@
         hotkey = event.payload.hotkey;
       });
 
+      const unlistenAutoCopyUpdated = await listen<{ auto_copy: boolean }>(
+        'auto-copy-updated',
+        (event) => {
+          autoCopy = event.payload.auto_copy;
+        }
+      );
+
+      const unlistenNotice = await listen<NoticePayload>('app-notice', (event) => {
+        setNotice(event.payload.message);
+      });
+
       cleanup = () => {
         stopHotkeyCapture();
+        if (noticeTimer !== null) {
+          window.clearTimeout(noticeTimer);
+          noticeTimer = null;
+        }
         unlistenStarted();
         unlistenStopped();
         unlistenCompleted();
@@ -411,6 +477,8 @@
         unlistenModelProgress();
         unlistenModelComplete();
         unlistenHotkeyUpdated();
+        unlistenAutoCopyUpdated();
+        unlistenNotice();
       };
     };
 
@@ -472,6 +540,26 @@
       {:else if rebindingHotkey}
         <p class="hotkey-hint">Press your new shortcut, or Esc to cancel.</p>
       {/if}
+
+      <div class="auto-copy-row">
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            checked={autoCopy}
+            on:change={onAutoCopyToggle}
+            disabled={autoCopyBusy}
+          />
+          <span>Auto-copy transcripts</span>
+        </label>
+      </div>
+      {#if audioStatus?.default_input}
+        <p class="audio-hint">
+          Mic: {audioStatus.default_input}
+          {#if audioStatus.default_sample_rate}
+            · {audioStatus.default_sample_rate} Hz
+          {/if}
+        </p>
+      {/if}
     </div>
 
     <div class="sep"></div>
@@ -512,6 +600,11 @@
         </div>
         <progress max="100" value={downloadPercent}></progress>
       </div>
+      <div class="sep"></div>
+    {/if}
+
+    {#if noticeMessage}
+      <div class="notice-band info">{noticeMessage}</div>
       <div class="sep"></div>
     {/if}
 

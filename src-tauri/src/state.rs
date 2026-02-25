@@ -25,6 +25,7 @@ pub struct SharedState {
     settings_path: Arc<PathBuf>,
     active_model: Arc<RwLock<String>>,
     hotkey: Arc<RwLock<String>>,
+    auto_copy: Arc<RwLock<bool>>,
 }
 
 impl SharedState {
@@ -34,6 +35,7 @@ impl SharedState {
         settings_path: PathBuf,
         active_model: String,
         hotkey: String,
+        auto_copy: bool,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -45,6 +47,7 @@ impl SharedState {
             settings_path: Arc::new(settings_path),
             active_model: Arc::new(RwLock::new(active_model)),
             hotkey: Arc::new(RwLock::new(hotkey)),
+            auto_copy: Arc::new(RwLock::new(auto_copy)),
         }
     }
 
@@ -109,6 +112,34 @@ impl SharedState {
 
         if let Err(err) = settings::save_hotkey(self.settings_path.as_ref().as_path(), &hotkey) {
             if let Ok(mut guard) = self.hotkey.write() {
+                *guard = previous;
+            }
+            return Err(err);
+        }
+
+        Ok(())
+    }
+
+    pub fn auto_copy(&self) -> bool {
+        self.auto_copy
+            .read()
+            .map(|value| *value)
+            .unwrap_or(settings::DEFAULT_AUTO_COPY)
+    }
+
+    pub fn set_auto_copy(&self, enabled: bool) -> Result<(), String> {
+        let previous = self.auto_copy();
+
+        {
+            let mut guard = self
+                .auto_copy
+                .write()
+                .map_err(|_| "Auto-copy lock poisoned".to_string())?;
+            *guard = enabled;
+        }
+
+        if let Err(err) = settings::save_auto_copy(self.settings_path.as_ref().as_path(), enabled) {
+            if let Ok(mut guard) = self.auto_copy.write() {
                 *guard = previous;
             }
             return Err(err);

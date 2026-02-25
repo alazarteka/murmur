@@ -5,16 +5,29 @@ use std::str::FromStr;
 use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
 
 pub const DEFAULT_HOTKEY: &str = "control+shift+KeyS";
+pub const DEFAULT_AUTO_COPY: bool = false;
+
+fn default_hotkey() -> String {
+    DEFAULT_HOTKEY.to_string()
+}
+
+fn default_auto_copy() -> bool {
+    DEFAULT_AUTO_COPY
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default = "default_hotkey")]
     pub hotkey: String,
+    #[serde(default = "default_auto_copy")]
+    pub auto_copy: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.to_string(),
+            auto_copy: DEFAULT_AUTO_COPY,
         }
     }
 }
@@ -34,7 +47,18 @@ pub fn save_hotkey(path: &Path, hotkey: &str) -> std::result::Result<(), String>
     let canonical =
         canonicalize_hotkey(hotkey).ok_or_else(|| "Invalid hotkey format".to_string())?;
 
-    let settings = AppSettings { hotkey: canonical };
+    let mut settings = load(path);
+    settings.hotkey = canonical;
+    write(path, &settings)
+}
+
+pub fn save_auto_copy(path: &Path, enabled: bool) -> std::result::Result<(), String> {
+    let mut settings = load(path);
+    settings.auto_copy = enabled;
+    write(path, &settings)
+}
+
+fn write(path: &Path, settings: &AppSettings) -> std::result::Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create settings directory: {e}"))?;

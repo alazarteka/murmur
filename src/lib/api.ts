@@ -1,25 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppStatus, HistoryEntry, ModelInfo } from './types';
+import type { AppStatus, AudioInputStatus, HistoryEntry, ModelInfo } from './types';
 
 const bridgeMissingError =
   'Tauri bridge unavailable. Use the Murmur app window from the tray (not a standalone browser tab).';
 
 const safeInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
-  const win = window as Window & {
-    __TAURI__?: { core?: { invoke?: <R>(cmd: string, payload?: Record<string, unknown>) => Promise<R> } };
-    __TAURI_INTERNALS__?: { invoke?: <R>(cmd: string, payload?: Record<string, unknown>) => Promise<R> };
-  };
-
-  const globalInvoke = win.__TAURI__?.core?.invoke;
-  if (typeof globalInvoke === 'function') {
-    return globalInvoke<T>(command, args);
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    const message = String(error);
+    if (message.includes('__TAURI_INTERNALS__')) {
+      throw new Error(bridgeMissingError);
+    }
+    throw error;
   }
-
-  if (typeof win.__TAURI_INTERNALS__?.invoke === 'function') {
-    return invoke<T>(command, args);
-  }
-
-  throw new Error(bridgeMissingError);
 };
 
 export const startRecording = (): Promise<void> => safeInvoke('start_recording');
@@ -44,3 +38,11 @@ export const setActiveModel = (fileName: string): Promise<void> =>
 export const getHotkey = (): Promise<string> => safeInvoke('get_hotkey');
 
 export const setHotkey = (hotkey: string): Promise<string> => safeInvoke('set_hotkey', { hotkey });
+
+export const getAutoCopy = (): Promise<boolean> => safeInvoke('get_auto_copy');
+
+export const setAutoCopy = (enabled: boolean): Promise<boolean> =>
+  safeInvoke('set_auto_copy', { enabled });
+
+export const getAudioInputStatus = (): Promise<AudioInputStatus> =>
+  safeInvoke('get_audio_input_status');

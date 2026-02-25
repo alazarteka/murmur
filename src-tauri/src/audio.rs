@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -10,6 +12,7 @@ pub struct RecordingSession {
     stop_tx: mpsc::Sender<()>,
     worker: Option<JoinHandle<()>>,
     pub samples: Arc<Mutex<Vec<f32>>>,
+    reached_capacity: Arc<AtomicBool>,
     pub sample_rate: u32,
     pub started_at: Instant,
 }
@@ -18,15 +21,72 @@ pub struct CapturedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub duration_ms: i64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioInputStatus {
+    pub available_inputs: usize,
+    pub default_input: Option<String>,
+    pub default_sample_rate: Option<u32>,
+    pub ok: bool,
+    pub message: Option<String>,
+}
+
+pub fn input_status() -> AudioInputStatus {
+    let host = cpal::default_host();
+
+    let (available_inputs, list_err) = match host.input_devices() {
+        Ok(devices) => (devices.count(), None),
+        Err(err) => (0, Some(err.to_string())),
+    };
+
+    let default_device = host.default_input_device();
+    let default_input = default_device
+        .as_ref()
+        .and_then(|device| device.name().ok())
+        .filter(|name| !name.trim().is_empty());
+
+    let default_sample_rate = default_device
+        .as_ref()
+        .and_then(|device| device.default_input_config().ok())
+        .map(|cfg| cfg.sample_rate().0);
+
+    let message = if let Some(err) = list_err {
+        Some(format!("Failed to enumerate input devices: {err}"))
+    } else if default_input.is_none() {
+        Some(
+            "No default microphone detected. Check System Settings > Privacy & Security > Microphone."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    AudioInputStatus {
+        available_inputs,
+        default_input,
+        default_sample_rate,
+        ok: message.is_none(),
+        message,
+    }
 }
 
 pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
-        .ok_or_else(|| anyhow!("No input microphone device found"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "No input microphone device found. Check System Settings > Privacy & Security > Microphone."
+            )
+        })?;
 
-    let supported = device.default_input_config()?;
+    let supported = device.default_input_config().map_err(|err| {
+        anyhow!(
+            "Failed to access microphone configuration: {err}. Verify microphone permissions and input device availability."
+        )
+    })?;
     let sample_rate = supported.sample_rate().0;
     let channels = usize::from(supported.channels());
     let config: StreamConfig = supported.clone().into();
@@ -34,6 +94,8 @@ pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
     let max_samples = sample_rate as usize * max_seconds as usize;
     let samples = Arc::new(Mutex::new(Vec::<f32>::with_capacity(max_samples)));
     let samples_for_thread = Arc::clone(&samples);
+    let reached_capacity = Arc::new(AtomicBool::new(false));
+    let capacity_for_thread = Arc::clone(&reached_capacity);
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
@@ -45,17 +107,30 @@ pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
             SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
-                    push_samples_f32(data, channels, max_samples, &samples_for_thread)
+                    push_samples_f32(
+                        data,
+                        channels,
+                        max_samples,
+                        &samples_for_thread,
+                        &capacity_for_thread,
+                    )
                 },
                 err_fn,
                 None,
             ),
             SampleFormat::I16 => {
                 let samples_for_thread = Arc::clone(&samples_for_thread);
+                let capacity_for_thread = Arc::clone(&capacity_for_thread);
                 device.build_input_stream(
                     &config,
                     move |data: &[i16], _| {
-                        push_samples_i16(data, channels, max_samples, &samples_for_thread)
+                        push_samples_i16(
+                            data,
+                            channels,
+                            max_samples,
+                            &samples_for_thread,
+                            &capacity_for_thread,
+                        )
                     },
                     err_fn,
                     None,
@@ -63,10 +138,17 @@ pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
             }
             SampleFormat::U16 => {
                 let samples_for_thread = Arc::clone(&samples_for_thread);
+                let capacity_for_thread = Arc::clone(&capacity_for_thread);
                 device.build_input_stream(
                     &config,
                     move |data: &[u16], _| {
-                        push_samples_u16(data, channels, max_samples, &samples_for_thread)
+                        push_samples_u16(
+                            data,
+                            channels,
+                            max_samples,
+                            &samples_for_thread,
+                            &capacity_for_thread,
+                        )
                     },
                     err_fn,
                     None,
@@ -96,6 +178,7 @@ pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
             stop_tx,
             worker: Some(worker),
             samples,
+            reached_capacity,
             sample_rate,
             started_at: Instant::now(),
         }),
@@ -121,41 +204,61 @@ pub fn stop_capture(mut session: RecordingSession) -> CapturedAudio {
         .samples
         .lock()
         .map_or_else(|_| Vec::new(), |buf| buf.clone());
+    let truncated = session.reached_capacity.load(Ordering::Relaxed);
 
     CapturedAudio {
         samples,
         sample_rate: session.sample_rate,
         duration_ms,
+        truncated,
     }
 }
 
-fn push_samples_f32(data: &[f32], channels: usize, max_samples: usize, out: &Arc<Mutex<Vec<f32>>>) {
+fn push_samples_f32(
+    data: &[f32],
+    channels: usize,
+    max_samples: usize,
+    out: &Arc<Mutex<Vec<f32>>>,
+    truncated: &Arc<AtomicBool>,
+) {
     let mut buffer = match out.lock() {
         Ok(guard) => guard,
         Err(_) => return,
     };
 
-    append_mono(data, channels, max_samples, &mut buffer, |s| s);
+    append_mono(data, channels, max_samples, truncated, &mut buffer, |s| s);
 }
 
-fn push_samples_i16(data: &[i16], channels: usize, max_samples: usize, out: &Arc<Mutex<Vec<f32>>>) {
+fn push_samples_i16(
+    data: &[i16],
+    channels: usize,
+    max_samples: usize,
+    out: &Arc<Mutex<Vec<f32>>>,
+    truncated: &Arc<AtomicBool>,
+) {
     let mut buffer = match out.lock() {
         Ok(guard) => guard,
         Err(_) => return,
     };
 
-    append_mono(data, channels, max_samples, &mut buffer, |s| {
+    append_mono(data, channels, max_samples, truncated, &mut buffer, |s| {
         s as f32 / i16::MAX as f32
     });
 }
 
-fn push_samples_u16(data: &[u16], channels: usize, max_samples: usize, out: &Arc<Mutex<Vec<f32>>>) {
+fn push_samples_u16(
+    data: &[u16],
+    channels: usize,
+    max_samples: usize,
+    out: &Arc<Mutex<Vec<f32>>>,
+    truncated: &Arc<AtomicBool>,
+) {
     let mut buffer = match out.lock() {
         Ok(guard) => guard,
         Err(_) => return,
     };
 
-    append_mono(data, channels, max_samples, &mut buffer, |s| {
+    append_mono(data, channels, max_samples, truncated, &mut buffer, |s| {
         (s as f32 - 32768.0) / 32768.0
     });
 }
@@ -164,6 +267,7 @@ fn append_mono<T, F>(
     data: &[T],
     channels: usize,
     max_samples: usize,
+    truncated: &Arc<AtomicBool>,
     out: &mut Vec<f32>,
     convert: F,
 ) where
@@ -176,6 +280,7 @@ fn append_mono<T, F>(
 
     for frame in data.chunks(channels) {
         if out.len() >= max_samples {
+            truncated.store(true, Ordering::Relaxed);
             break;
         }
         let sum: f32 = frame.iter().map(|v| convert(*v)).sum();

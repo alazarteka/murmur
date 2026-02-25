@@ -52,12 +52,14 @@ fn main() {
             let settings = settings::load(&settings_path);
             let active_model = models::pick_default_model(&models_dir);
             let hotkey = settings.hotkey.clone();
+            let auto_copy = settings.auto_copy;
             app.manage(state::SharedState::new(
                 db_path,
                 models_dir,
                 settings_path,
                 active_model,
                 hotkey.clone(),
+                auto_copy,
             ));
 
             register_hotkey(app, &hotkey)?;
@@ -88,6 +90,9 @@ fn main() {
             commands::set_active_model,
             commands::get_hotkey,
             commands::set_hotkey,
+            commands::get_auto_copy,
+            commands::set_auto_copy,
+            commands::get_audio_input_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

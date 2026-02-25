@@ -82,6 +82,10 @@ const KNOWN_MODELS: &[KnownModel] = &[
     },
 ];
 
+const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
+const RETRY_BACKOFF_SECS: [u64; MAX_DOWNLOAD_ATTEMPTS - 1] = [2, 5];
+const MIN_EXPECTED_MODEL_BYTES: u64 = 10 * 1024 * 1024;
+
 pub fn pick_default_model(models_dir: &Path) -> String {
     if let Some(best) = PREFERRED_ORDER
         .iter()
@@ -155,63 +159,101 @@ where
     }
 
     let partial = models_dir.join(format!("{file_name}.part"));
-    let _ = fs::remove_file(&partial);
+    let mut last_err: Option<anyhow::Error> = None;
 
-    let result = (|| -> Result<()> {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(60 * 30))
-            .build()?;
+    for attempt in 1..=MAX_DOWNLOAD_ATTEMPTS {
+        let _ = fs::remove_file(&partial);
 
-        let mut response = client
-            .get(known.download_url)
-            .header("User-Agent", "murmur/0.1")
-            .send()?
-            .error_for_status()?;
+        match download_model_once(known.download_url, &partial, &mut on_progress) {
+            Ok(bytes) => {
+                if bytes < MIN_EXPECTED_MODEL_BYTES {
+                    let _ = fs::remove_file(&partial);
+                    return Err(anyhow!(
+                        "Downloaded model is unexpectedly small ({bytes} bytes)."
+                    ));
+                }
 
-        let total_bytes = response.content_length();
-        let mut file = File::create(&partial)?;
-
-        let mut downloaded: u64 = 0;
-        let mut last_percent: u8 = 0;
-        let mut buffer = [0_u8; 64 * 1024];
-
-        on_progress(0);
-
-        loop {
-            let read = response.read(&mut buffer)?;
-            if read == 0 {
-                break;
+                fs::rename(&partial, &destination)?;
+                on_progress(100);
+                return Ok(());
             }
+            Err(err) => {
+                last_err = Some(err);
+                let _ = fs::remove_file(&partial);
 
-            file.write_all(&buffer[..read])?;
-            downloaded += read as u64;
-
-            if let Some(total) = total_bytes {
-                if total > 0 {
-                    let percent = ((downloaded.saturating_mul(100)) / total).min(100) as u8;
-                    if percent != last_percent {
-                        last_percent = percent;
-                        on_progress(percent);
-                    }
+                if attempt < MAX_DOWNLOAD_ATTEMPTS {
+                    std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[attempt - 1]));
                 }
             }
         }
-
-        file.flush()?;
-        file.sync_all()?;
-
-        fs::rename(&partial, &destination)?;
-        on_progress(100);
-
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&partial);
     }
 
-    result
+    Err(anyhow!(
+        "Failed to download model '{}' after {} attempts: {}",
+        file_name,
+        MAX_DOWNLOAD_ATTEMPTS,
+        last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+fn download_model_once<F>(download_url: &str, partial: &Path, on_progress: &mut F) -> Result<u64>
+where
+    F: FnMut(u8),
+{
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(60 * 20))
+        .build()?;
+
+    let mut response = client
+        .get(download_url)
+        .header("User-Agent", "murmur/0.1")
+        .send()?
+        .error_for_status()?;
+
+    let total_bytes = response.content_length();
+    let mut file = File::create(partial)?;
+
+    let mut downloaded: u64 = 0;
+    let mut last_percent: u8 = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+
+    on_progress(0);
+
+    loop {
+        let read = response.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+
+        file.write_all(&buffer[..read])?;
+        downloaded += read as u64;
+
+        if let Some(total) = total_bytes {
+            if total > 0 {
+                let percent = ((downloaded.saturating_mul(100)) / total).min(100) as u8;
+                if percent != last_percent {
+                    last_percent = percent;
+                    on_progress(percent);
+                }
+            }
+        }
+    }
+
+    file.flush()?;
+    file.sync_all()?;
+
+    if let Some(total) = total_bytes {
+        if downloaded != total {
+            anyhow::bail!(
+                "Incomplete download: expected {total} bytes, downloaded {downloaded} bytes"
+            );
+        }
+    }
+
+    Ok(downloaded)
 }
 
 fn read_installed_model_files(models_dir: &Path) -> Result<Vec<String>> {

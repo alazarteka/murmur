@@ -7,6 +7,7 @@ use crate::whisper;
 use anyhow::Result;
 use serde::Serialize;
 use std::str::FromStr;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut};
@@ -22,6 +23,7 @@ struct TranscriptionCompletePayload {
     text: String,
     duration_ms: i64,
     model: String,
+    auto_copied: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +40,16 @@ struct ModelDownloadCompletePayload {
 #[derive(Debug, Clone, Serialize)]
 struct HotkeyUpdatedPayload {
     hotkey: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AutoCopyUpdatedPayload {
+    auto_copy: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NoticePayload {
+    message: String,
 }
 
 #[tauri::command]
@@ -96,12 +108,39 @@ pub fn get_hotkey(state: State<'_, SharedState>) -> String {
 }
 
 #[tauri::command]
+pub fn get_auto_copy(state: State<'_, SharedState>) -> bool {
+    state.auto_copy()
+}
+
+#[tauri::command]
 pub fn set_hotkey(
     app: AppHandle,
     state: State<'_, SharedState>,
     hotkey: String,
 ) -> Result<String, String> {
     set_hotkey_impl(app, state.inner().clone(), hotkey).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_auto_copy(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state
+        .set_auto_copy(enabled)
+        .map_err(|err| err.to_string())?;
+
+    let _ = app.emit(
+        "auto-copy-updated",
+        AutoCopyUpdatedPayload { auto_copy: enabled },
+    );
+    Ok(enabled)
+}
+
+#[tauri::command]
+pub fn get_audio_input_status() -> audio::AudioInputStatus {
+    audio::input_status()
 }
 
 #[tauri::command]
@@ -206,7 +245,10 @@ pub async fn toggle_recording_impl(app: AppHandle, state: SharedState) -> Result
             Ok(())
         }
         AppStatus::Recording => stop_recording_impl(app, state).await,
-        AppStatus::Processing => Ok(()),
+        AppStatus::Processing => {
+            emit_notice(&app, "Transcription is still running. Please wait.");
+            Ok(())
+        }
     }
 }
 
@@ -215,6 +257,13 @@ pub fn emit_error(app: &AppHandle, message: impl Into<String>) {
         message: message.into(),
     };
     let _ = app.emit("transcription-error", payload);
+}
+
+pub fn emit_notice(app: &AppHandle, message: impl Into<String>) {
+    let payload = NoticePayload {
+        message: message.into(),
+    };
+    let _ = app.emit("app-notice", payload);
 }
 
 fn start_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
@@ -233,20 +282,55 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
     let result: Result<()> = async {
         let captured = audio::stop_capture(session);
 
+        if captured.truncated {
+            emit_notice(
+                &app,
+                "Recording exceeded 30 seconds. Only the first 30 seconds were transcribed.",
+            );
+        }
+
         if captured.duration_ms < 200 {
             emit_error(&app, "Recording too short");
             return Ok(());
         }
 
         let db_path = state.db_path();
-        let model_path = state.active_model_path();
-        let model_name = state.active_model_name();
+        let models_dir = state.models_dir();
+        let mut model_name = state.active_model_name();
+        let mut model_path = state.active_model_path();
 
+        if !model_path.exists() {
+            let fallback = models::pick_default_model(&models_dir);
+            let fallback_path = models_dir.join(&fallback);
+            if fallback_path.exists() {
+                if fallback != model_name {
+                    emit_notice(
+                        &app,
+                        format!(
+                            "Active model '{}' is missing. Switched to '{}'.",
+                            model_name, fallback
+                        ),
+                    );
+                }
+                let _ = state.set_active_model(fallback.clone());
+                model_name = fallback;
+                model_path = fallback_path;
+            }
+        }
+
+        if !model_path.exists() {
+            anyhow::bail!(
+                "No installed model available. Download a model or add a .bin file in the models directory."
+            );
+        }
+
+        let transcribe_started = Instant::now();
         let transcription = tauri::async_runtime::spawn_blocking(move || {
             whisper::transcribe(&model_path, &captured.samples, captured.sample_rate)
                 .map(|text| (text, captured.duration_ms))
         })
         .await??;
+        let transcribe_ms = transcribe_started.elapsed().as_millis() as u64;
 
         let (text, duration_ms) = transcription;
         let normalized = if text.trim().is_empty() {
@@ -257,13 +341,29 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
 
         let id = db::insert(&db_path, &normalized, duration_ms, &model_name)?;
 
-        app.clipboard().write_text(normalized.clone())?;
+        let auto_copied = if state.auto_copy() {
+            app.clipboard().write_text(normalized.clone())?;
+            true
+        } else {
+            false
+        };
+
+        if transcribe_ms > 15_000 {
+            emit_notice(
+                &app,
+                format!(
+                    "Transcription took {:.1}s. Consider a smaller model for faster response.",
+                    transcribe_ms as f64 / 1000.0
+                ),
+            );
+        }
 
         let payload = TranscriptionCompletePayload {
             id,
             text: normalized,
             duration_ms,
             model: model_name,
+            auto_copied,
         };
         let _ = app.emit("transcription-complete", payload);
         Ok(())
