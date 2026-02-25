@@ -1,29 +1,34 @@
-# Murmur (Current Build)
+# Murmur
 
-Local-first menu bar speech-to-text app for macOS using Tauri + Svelte + Rust.
+Local-first menu bar speech-to-text app for macOS, built with Tauri + Svelte + Rust.
 
-## What works now
+## Current behavior
 
-- Menu bar tray app with toggle hotkey (`Ctrl+Shift+S`).
-- Audio capture via `cpal` from default input device.
-- Whisper transcription through `whisper-rs`.
-- Auto-copy transcription to clipboard.
-- SQLite history (list + delete).
-- Editable result area and model selector UI with auto-download for known models.
+- Menu bar app with global hotkey to start/stop recording (default: `Ctrl+Shift+S`).
+- Audio capture from the default microphone with CPAL.
+- Local Whisper transcription via `whisper-rs` (English transcription mode).
+- Recording hard limit: 30 seconds (if exceeded, the app transcribes the first 30s and shows a notice).
+- SQLite history with list + delete.
+- Model selector UI with known-model auto-download (Hugging Face), progress UI, retries, and fallback to installed models.
+- Clipboard behavior is configurable:
+  - `Auto-copy transcripts` setting is persisted.
+  - Default is **off**.
+  - Manual `Copy` is always available.
 
-## UI behavior
+## Tray and window UX
 
-- The app does **not** auto-pop open while recording/transcribing.
-- Open/close from tray icon left click.
+- App starts as a menu bar accessory and keeps the main window hidden by default.
+- Left-click tray icon toggles window visibility.
 - Tray menu includes `Open Murmur` and `Quit Murmur`.
+- Closing the window hides it instead of quitting.
 
-## Model directory
+## Model files
 
-Place model files in:
+Put `.bin` whisper models in:
 
 `~/Library/Application Support/com.alazar.murmur/models/`
 
-The app auto-picks the best installed model by preference:
+Preferred model order (best available installed model is auto-selected):
 
 1. `ggml-large-v3-turbo-q5_0.bin`
 2. `ggml-large-v3-turbo.bin`
@@ -33,15 +38,34 @@ The app auto-picks the best installed model by preference:
 6. `ggml-base.en.bin`
 7. `ggml-tiny.en.bin`
 
-You can switch the active model from the UI dropdown.
-If the selected known model is missing, Murmur downloads it automatically and then activates it.
+If you select a known model that is not installed, Murmur tries to download it automatically.
 
-## Run locally
+## Local run
 
-1. `npm install`
-2. `npm run tauri:dev`
+1. Install dependencies:
+   - `npm install`
+2. Start dev app:
+   - `npm run tauri:dev`
 
-## Build checks
+## Build and checks
 
-- Frontend: `npm run build`
-- Rust backend: `cd src-tauri && cargo check`
+- Frontend build: `npm run build`
+- Rust check: `cd src-tauri && cargo check`
+- Local production bundle: `npm run tauri:build`
+
+## Data and settings paths
+
+Under app data directory (`com.alazar.murmur`):
+
+- `models/` for model binaries
+- `murmur.db` for transcription history
+- `settings.json` for hotkey + auto-copy preference
+
+## GitHub Actions release flow
+
+- Workflow: `.github/workflows/main-release.yml`
+- Runs on `push` to `main` only when build-relevant files change (plus manual dispatch).
+- Builds macOS bundles and updates a rolling prerelease tag: `main-latest`.
+- Uploads:
+  - `.dmg`
+  - `Murmur.app.zip`

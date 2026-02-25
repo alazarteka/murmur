@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "src/**"
+      - "src-tauri/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "tsconfig.node.json"
+      - "vite.config.ts"
+      - ".github/workflows/main-release.yml"
   workflow_dispatch:
 
 permissions:
@@ -33,6 +43,9 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies
         run: npm ci
 
@@ -51,14 +64,31 @@ jobs:
           git tag -f main-latest "${GITHUB_SHA}"
           git push --force origin refs/tags/main-latest
 
-      - name: Publish rolling release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: main-latest
-          name: Main Latest
-          prerelease: true
-          body: |
-            Automated build from main at commit ${{ github.sha }}.
-          files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/Murmur.app.zip
+      - name: Ensure rolling prerelease exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOTES="Automated build from main at commit ${GITHUB_SHA}."
+
+          if gh release view main-latest >/dev/null 2>&1; then
+            gh release edit main-latest \
+              --title "Main Latest" \
+              --notes "${NOTES}" \
+              --prerelease
+          else
+            gh release create main-latest \
+              --title "Main Latest" \
+              --notes "${NOTES}" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload main-latest \
+            src-tauri/target/release/bundle/dmg/*.dmg \
+            src-tauri/target/release/bundle/macos/Murmur.app.zip \
+            --clobber
