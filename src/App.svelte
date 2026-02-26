@@ -738,7 +738,7 @@
       <div class="section-header">
         <span class="section-label">Updates</span>
       </div>
-      <div class="action-row updater-row">
+      <div class="action-row updater-row" class:single={!pendingUpdate}>
         <button class="btn-secondary" on:click={() => checkForUpdates(false)} disabled={updaterBusy}>
           {updaterBusy ? 'Checking…' : 'Check for updates'}
         </button>
