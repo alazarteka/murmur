@@ -43,7 +43,7 @@
       "endpoints": [
         "https://github.com/alazarteka/murmur/releases/download/main-latest/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5QkM0MTdDMTk5QzNDNjgKUldSb1BKd1pmRUc4aWFXdXRsV201cEZNc2dOblZMakd2VktNcks1SGR6WVZMRENJNE56VStNK2MK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMyNUI1OUY1Qzc4NzlGQ0EKUldUS240Zkg5Vmxid2w0b0lRWCtkUDhjR1BadDRtT2g4VG1BS0ZwN21OSVh6L3R3MGlNcWdxRXYK"
     }
   },
   "bundle": {
