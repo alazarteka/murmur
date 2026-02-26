@@ -139,7 +139,10 @@ jobs:
           APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-        run: npx tauri build --config src-tauri/tauri.release.conf.json
+        run: |
+          SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+          echo "Using Apple signing identity: ${SIGN_IDENTITY}"
+          APPLE_SIGNING_IDENTITY="${SIGN_IDENTITY}" npx tauri build --config src-tauri/tauri.release.conf.json
 
       - name: Zip app bundle
         run: |
