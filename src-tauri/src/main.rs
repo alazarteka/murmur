@@ -79,6 +79,8 @@ fn main() {
                 main_window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
+                        #[cfg(target_os = "macos")]
+                        let _ = window_for_close.set_visible_on_all_workspaces(false);
                         let _ = window_for_close.hide();
                     }
                 });
@@ -159,6 +161,8 @@ fn toggle_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         match window.is_visible() {
             Ok(true) => {
+                #[cfg(target_os = "macos")]
+                let _ = window.set_visible_on_all_workspaces(false);
                 let _ = window.hide();
             }
             _ => show_window(app),
@@ -168,13 +172,13 @@ fn toggle_window(app: &AppHandle) {
 
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // Keep the window visible on every space while shown so tray-open works
+        // from the current desktop even when the app was last used elsewhere.
         #[cfg(target_os = "macos")]
         let _ = window.set_visible_on_all_workspaces(true);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
-        #[cfg(target_os = "macos")]
-        let _ = window.set_visible_on_all_workspaces(false);
     }
 }
 

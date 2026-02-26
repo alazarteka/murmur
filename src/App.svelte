@@ -274,7 +274,13 @@
       }
     } catch (error) {
       if (!silent) {
-        errorMessage = `Update check failed: ${String(error)}`;
+        const message = String(error);
+        if (message.includes("couldn't get a valid json")) {
+          errorMessage =
+            'Update check failed: updater metadata is not publicly reachable. If releases are in a private GitHub repo, use a public update feed or authenticated updater headers.';
+        } else {
+          errorMessage = `Update check failed: ${message}`;
+        }
       }
     } finally {
       updaterBusy = false;
