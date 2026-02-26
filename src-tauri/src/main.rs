@@ -13,8 +13,13 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{ActivationPolicy, AppHandle, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+pub(crate) const TRAY_ID: &str = "murmur-tray";
+
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -50,7 +55,11 @@ fn main() {
 
             let settings_path = app_data.join("settings.json");
             let settings = settings::load(&settings_path);
-            let active_model = models::pick_default_model(&models_dir);
+            let active_model = settings
+                .active_model
+                .clone()
+                .filter(|file_name| models_dir.join(file_name).exists())
+                .unwrap_or_else(|| models::pick_default_model(&models_dir));
             let hotkey = settings.hotkey.clone();
             let auto_copy = settings.auto_copy;
             app.manage(state::SharedState::new(
@@ -83,6 +92,7 @@ fn main() {
             commands::start_recording,
             commands::stop_recording,
             commands::toggle_recording,
+            commands::cancel_transcription,
             commands::get_history,
             commands::delete_transcription,
             commands::copy_text,
@@ -116,10 +126,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit Murmur", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-    let mut builder = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .icon_as_template(true)
+        .icon_as_template(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_window(app),
             "quit" => app.exit(0),
@@ -138,7 +148,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-    builder = builder.icon(tray_template_icon());
+    builder = builder.icon(tray_icon_default());
 
     builder.build(app)?;
 
@@ -164,7 +174,27 @@ fn show_window(app: &AppHandle) {
     }
 }
 
-fn tray_template_icon() -> tauri::image::Image<'static> {
+pub(crate) fn set_tray_listening(app: &AppHandle, listening: bool) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let icon = if listening {
+            tray_icon_listening()
+        } else {
+            tray_icon_default()
+        };
+        let _ = tray.set_icon(Some(icon));
+        let _ = tray.set_icon_as_template(false);
+    }
+}
+
+fn tray_icon_default() -> tauri::image::Image<'static> {
+    tray_icon_with_color([0, 0, 0, 255])
+}
+
+fn tray_icon_listening() -> tauri::image::Image<'static> {
+    tray_icon_with_color([255, 210, 48, 255])
+}
+
+fn tray_icon_with_color(color: [u8; 4]) -> tauri::image::Image<'static> {
     const WIDTH: usize = 18;
     const HEIGHT: usize = 18;
     let mut rgba = vec![0_u8; WIDTH * HEIGHT * 4];
@@ -174,10 +204,10 @@ fn tray_template_icon() -> tauri::image::Image<'static> {
             return;
         }
         let idx = (y * WIDTH + x) * 4;
-        rgba[idx] = 0;
-        rgba[idx + 1] = 0;
-        rgba[idx + 2] = 0;
-        rgba[idx + 3] = 255;
+        rgba[idx] = color[0];
+        rgba[idx + 1] = color[1];
+        rgba[idx + 2] = color[2];
+        rgba[idx + 3] = color[3];
     };
 
     for y in 3..10 {

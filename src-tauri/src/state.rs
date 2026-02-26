@@ -2,6 +2,7 @@ use crate::audio::RecordingSession;
 use crate::settings;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -10,11 +11,13 @@ pub enum AppStatus {
     Idle,
     Recording,
     Processing,
+    Cancelling,
 }
 
 struct Inner {
     status: AppStatus,
     recording: Option<RecordingSession>,
+    cancel_requested: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone)]
@@ -41,6 +44,7 @@ impl SharedState {
             inner: Arc::new(Mutex::new(Inner {
                 status: AppStatus::Idle,
                 recording: None,
+                cancel_requested: None,
             })),
             db_path: Arc::new(db_path),
             models_dir: Arc::new(models_dir),
@@ -63,24 +67,46 @@ impl SharedState {
         if guard.status != AppStatus::Idle {
             return Err("App is not idle");
         }
+        guard.cancel_requested = None;
         guard.recording = Some(session);
         guard.status = AppStatus::Recording;
         Ok(())
     }
 
-    pub fn take_recording(&self) -> Result<RecordingSession, &'static str> {
+    pub fn take_recording(&self) -> Result<(RecordingSession, Arc<AtomicBool>), &'static str> {
         let mut guard = self.inner.lock().map_err(|_| "State lock poisoned")?;
         if guard.status != AppStatus::Recording {
             return Err("App is not recording");
         }
         guard.status = AppStatus::Processing;
-        guard.recording.take().ok_or("Recording session missing")
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        guard.cancel_requested = Some(cancel_requested.clone());
+        let recording = guard.recording.take().ok_or("Recording session missing")?;
+        Ok((recording, cancel_requested))
+    }
+
+    pub fn request_cancel_processing(&self) -> Result<bool, &'static str> {
+        let mut guard = self.inner.lock().map_err(|_| "State lock poisoned")?;
+        match guard.status {
+            AppStatus::Processing => {
+                if let Some(flag) = &guard.cancel_requested {
+                    flag.store(true, Ordering::Relaxed);
+                    guard.status = AppStatus::Cancelling;
+                    Ok(true)
+                } else {
+                    Err("No active transcription task")
+                }
+            }
+            AppStatus::Cancelling => Ok(false),
+            _ => Err("App is not processing"),
+        }
     }
 
     pub fn set_idle(&self) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.status = AppStatus::Idle;
             guard.recording = None;
+            guard.cancel_requested = None;
         }
     }
 
@@ -159,21 +185,35 @@ impl SharedState {
         self.models_dir().join(self.active_model_name())
     }
 
-    pub fn set_active_model(&self, file_name: String) -> Result<(), &'static str> {
+    pub fn set_active_model(&self, file_name: String) -> Result<(), String> {
         if file_name.trim().is_empty() {
-            return Err("Model file name cannot be empty");
+            return Err("Model file name cannot be empty".to_string());
         }
 
         let model_path = self.models_dir().join(&file_name);
         if !model_path.exists() {
-            return Err("Selected model is not installed in the models directory");
+            return Err("Selected model is not installed in the models directory".to_string());
         }
+
+        let previous = self.active_model_name();
 
         let mut guard = self
             .active_model
             .write()
-            .map_err(|_| "Model lock poisoned")?;
+            .map_err(|_| "Model lock poisoned".to_string())?;
         *guard = file_name;
+        drop(guard);
+
+        if let Err(err) = settings::save_active_model(
+            self.settings_path.as_ref().as_path(),
+            Some(&self.active_model_name()),
+        ) {
+            if let Ok(mut rollback) = self.active_model.write() {
+                *rollback = previous;
+            }
+            return Err(err);
+        }
+
         Ok(())
     }
 }

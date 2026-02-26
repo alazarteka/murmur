@@ -1,8 +1,15 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-pub fn transcribe(model_path: &Path, input: &[f32], sample_rate: u32) -> Result<String> {
+pub fn transcribe(
+    model_path: &Path,
+    input: &[f32],
+    sample_rate: u32,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<String> {
     if input.is_empty() {
         return Ok(String::new());
     }
@@ -42,6 +49,9 @@ pub fn transcribe(model_path: &Path, input: &[f32], sample_rate: u32) -> Result<
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
+    if let Some(cancel_flag) = cancel_flag {
+        params.set_abort_callback_safe(move || cancel_flag.load(Ordering::Relaxed));
+    }
 
     state.full(params, &audio_16k)?;
 

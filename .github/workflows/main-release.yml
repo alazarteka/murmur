@@ -49,8 +49,89 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY secret. Updater artifacts require it."
+            exit 1
+          fi
+
+      - name: Set CI release version
+        run: |
+          APP_VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          export APP_VERSION
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.APP_VERSION;
+
+          const tauriPath = 'src-tauri/tauri.conf.json';
+          const tauri = JSON.parse(fs.readFileSync(tauriPath, 'utf8'));
+          tauri.version = version;
+          fs.writeFileSync(tauriPath, JSON.stringify(tauri, null, 2) + '\n');
+
+          const packagePath = 'package.json';
+          const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+          pkg.version = version;
+          fs.writeFileSync(packagePath, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+
+          sed -i '' -E "s/^version = \".*\"/version = \"${APP_VERSION}\"/" src-tauri/Cargo.toml
+
+      - name: Import Apple signing certificate
+        if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          if [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
+            APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | head -n 1 | sed -E 's/.*\"([^\"]+)\".*/\1/')"
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY}" >> "$GITHUB_ENV"
+
+      - name: Prepare App Store Connect API key
+        if: ${{ secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != '' && secrets.APPLE_API_KEY_P8 != '' }}
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "$APPLE_API_KEY_P8" | base64 --decode > "$KEY_PATH"
+          echo "APPLE_API_KEY=${APPLE_API_KEY_ID}" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=${APPLE_API_ISSUER}" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY_PATH=${KEY_PATH}" >> "$GITHUB_ENV"
+
       - name: Build Tauri bundles
-        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ env.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+        run: npx tauri build --config src-tauri/tauri.release.conf.json
 
       - name: Zip app bundle
         run: |
@@ -91,4 +172,7 @@ jobs:
           gh release upload main-latest \
             src-tauri/target/release/bundle/dmg/*.dmg \
             src-tauri/target/release/bundle/macos/Murmur.app.zip \
+            src-tauri/target/release/bundle/updater/latest.json \
+            src-tauri/target/release/bundle/updater/*.tar.gz \
+            src-tauri/target/release/bundle/updater/*.sig \
             --clobber

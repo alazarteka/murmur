@@ -7,6 +7,7 @@ use crate::whisper;
 use anyhow::Result;
 use serde::Serialize;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -74,6 +75,17 @@ pub async fn toggle_recording(app: AppHandle, state: State<'_, SharedState>) -> 
     toggle_recording_impl(app, state.inner().clone())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_transcription(app: AppHandle, state: State<'_, SharedState>) -> Result<bool, String> {
+    let requested = state
+        .request_cancel_processing()
+        .map_err(|err| err.to_string())?;
+    if requested {
+        emit_notice(&app, "Cancelling transcription...");
+    }
+    Ok(requested)
 }
 
 #[tauri::command]
@@ -245,7 +257,7 @@ pub async fn toggle_recording_impl(app: AppHandle, state: SharedState) -> Result
             Ok(())
         }
         AppStatus::Recording => stop_recording_impl(app, state).await,
-        AppStatus::Processing => {
+        AppStatus::Processing | AppStatus::Cancelling => {
             emit_notice(&app, "Transcription is still running. Please wait.");
             Ok(())
         }
@@ -271,13 +283,15 @@ fn start_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
     state
         .set_recording(session)
         .map_err(|e| anyhow::anyhow!(e))?;
+    crate::set_tray_listening(&app, true);
     let _ = app.emit("recording-started", ());
     Ok(())
 }
 
 async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
-    let session = state.take_recording().map_err(|e| anyhow::anyhow!(e))?;
+    let (session, cancel_requested) = state.take_recording().map_err(|e| anyhow::anyhow!(e))?;
     let _ = app.emit("recording-stopped", ());
+    crate::set_tray_listening(&app, false);
 
     let result: Result<()> = async {
         let captured = audio::stop_capture(session);
@@ -324,15 +338,37 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             );
         }
 
+        let cancel_for_worker = cancel_requested.clone();
         let transcribe_started = Instant::now();
         let transcription = tauri::async_runtime::spawn_blocking(move || {
-            whisper::transcribe(&model_path, &captured.samples, captured.sample_rate)
+            whisper::transcribe(
+                &model_path,
+                &captured.samples,
+                captured.sample_rate,
+                Some(cancel_for_worker),
+            )
                 .map(|text| (text, captured.duration_ms))
         })
-        .await??;
+        .await?;
         let transcribe_ms = transcribe_started.elapsed().as_millis() as u64;
 
-        let (text, duration_ms) = transcription;
+        if cancel_requested.load(Ordering::Relaxed) {
+            emit_notice(&app, "Transcription cancelled.");
+            let _ = app.emit("transcription-cancelled", ());
+            return Ok(());
+        }
+
+        let (text, duration_ms) = match transcription {
+            Ok(value) => value,
+            Err(err) => {
+                if cancel_requested.load(Ordering::Relaxed) {
+                    emit_notice(&app, "Transcription cancelled.");
+                    let _ = app.emit("transcription-cancelled", ());
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
         let normalized = if text.trim().is_empty() {
             "(No speech detected)".to_string()
         } else {
@@ -371,6 +407,7 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
     .await;
 
     state.set_idle();
+    crate::set_tray_listening(&app, false);
     if let Err(err) = &result {
         emit_error(&app, err.to_string());
     }

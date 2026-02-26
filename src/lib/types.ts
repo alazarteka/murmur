@@ -1,4 +1,4 @@
-export type AppStatus = 'idle' | 'recording' | 'processing';
+export type AppStatus = 'idle' | 'recording' | 'processing' | 'cancelling';
 
 export interface HistoryEntry {
   id: number;

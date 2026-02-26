@@ -21,6 +21,8 @@ pub struct AppSettings {
     pub hotkey: String,
     #[serde(default = "default_auto_copy")]
     pub auto_copy: bool,
+    #[serde(default)]
+    pub active_model: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -28,6 +30,7 @@ impl Default for AppSettings {
         Self {
             hotkey: DEFAULT_HOTKEY.to_string(),
             auto_copy: DEFAULT_AUTO_COPY,
+            active_model: None,
         }
     }
 }
@@ -55,6 +58,15 @@ pub fn save_hotkey(path: &Path, hotkey: &str) -> std::result::Result<(), String>
 pub fn save_auto_copy(path: &Path, enabled: bool) -> std::result::Result<(), String> {
     let mut settings = load(path);
     settings.auto_copy = enabled;
+    write(path, &settings)
+}
+
+pub fn save_active_model(path: &Path, model: Option<&str>) -> std::result::Result<(), String> {
+    let mut settings = load(path);
+    settings.active_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     write(path, &settings)
 }
 

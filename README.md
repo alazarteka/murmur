@@ -2,14 +2,21 @@
 
 Local-first menu bar speech-to-text app for macOS, built with Tauri + Svelte + Rust.
 
+Roadmap: [ROADMAP.md](./ROADMAP.md)
+
 ## Current behavior
 
 - Menu bar app with global hotkey to start/stop recording (default: `Ctrl+Shift+S`).
 - Audio capture from the default microphone with CPAL.
 - Local Whisper transcription via `whisper-rs` (English transcription mode).
 - Recording hard limit: 30 seconds (if exceeded, the app transcribes the first 30s and shows a notice).
+- Transcription cancel button while processing.
+- Tray icon turns yellow while actively recording, then returns to default when idle/processing.
 - SQLite history with list + delete.
 - Model selector UI with known-model auto-download (Hugging Face), progress UI, retries, and fallback to installed models.
+- Active model preference is persisted in settings.
+- Launch-at-login toggle (via Tauri autostart plugin).
+- In-app update check + install flow (downloads update and relaunches app).
 - Clipboard behavior is configurable:
   - `Auto-copy transcripts` setting is persisted.
   - Default is **off**.
@@ -59,13 +66,20 @@ Under app data directory (`com.alazar.murmur`):
 
 - `models/` for model binaries
 - `murmur.db` for transcription history
-- `settings.json` for hotkey + auto-copy preference
+- `settings.json` for hotkey, auto-copy, and active model preference
 
 ## GitHub Actions release flow
 
 - Workflow: `.github/workflows/main-release.yml`
 - Runs on `push` to `main` only when build-relevant files change (plus manual dispatch).
-- Builds macOS bundles and updates a rolling prerelease tag: `main-latest`.
+- Uses Cargo cache (`Swatinem/rust-cache`) and npm cache.
+- Builds macOS bundles and updater artifacts, then updates a rolling prerelease tag: `main-latest`.
 - Uploads:
   - `.dmg`
   - `Murmur.app.zip`
+  - `latest.json`
+  - updater `.tar.gz` + `.sig` files
+- Updater signing secret required:
+  - `TAURI_SIGNING_PRIVATE_KEY`
+  - optional password: `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- Optional Apple signing/notarization secrets are supported by the workflow if configured.

@@ -36,6 +36,16 @@
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173 http://127.0.0.1:5173; font-src 'self' data:"
     }
   },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/alazarteka/murmur/releases/download/main-latest/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5QkM0MTdDMTk5QzNDNjgKUldSb1BKd1pmRUc4aWFXdXRsV201cEZNc2dOblZMakd2VktNcks1SGR6WVZMRENJNE56VStNK2MK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

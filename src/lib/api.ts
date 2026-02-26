@@ -19,6 +19,7 @@ const safeInvoke = async <T>(command: string, args?: Record<string, unknown>): P
 export const startRecording = (): Promise<void> => safeInvoke('start_recording');
 export const stopRecording = (): Promise<void> => safeInvoke('stop_recording');
 export const toggleRecording = (): Promise<void> => safeInvoke('toggle_recording');
+export const cancelTranscription = (): Promise<boolean> => safeInvoke('cancel_transcription');
 
 export const getHistory = (limit = 15): Promise<HistoryEntry[]> =>
   safeInvoke('get_history', { limit });

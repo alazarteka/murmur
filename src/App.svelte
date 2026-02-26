@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
+  import { relaunch } from '@tauri-apps/plugin-process';
+  import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
   import {
+    cancelTranscription,
     copyText,
     deleteTranscription,
     getAudioInputStatus,
@@ -102,9 +106,15 @@
   let hotkeyCaptureCleanup: (() => void) | null = null;
   let autoCopy = false;
   let autoCopyBusy = false;
+  let launchAtLogin = false;
+  let launchAtLoginBusy = false;
   let noticeMessage = '';
   let audioStatus: AudioInputStatus | null = null;
   let noticeTimer: number | null = null;
+  let updaterBusy = false;
+  let updaterMessage = '';
+  let updaterProgress: number | null = null;
+  let pendingUpdate: Update | null = null;
 
   $: displayModels = models.length > 0 ? models : FALLBACK_MODELS;
   $: activeModelInfo = displayModels.find((model) => model.file_name === activeModel) ?? null;
@@ -211,6 +221,101 @@
       errorMessage = `Auto-copy update failed: ${String(error)}`;
     } finally {
       autoCopyBusy = false;
+    }
+  };
+
+  const onLaunchAtLoginToggle = async (event: Event) => {
+    const target = event.currentTarget as HTMLInputElement | null;
+    if (!target) return;
+
+    const next = target.checked;
+    launchAtLoginBusy = true;
+    try {
+      if (next) {
+        await enable();
+      } else {
+        await disable();
+      }
+      launchAtLogin = next;
+    } catch (error) {
+      launchAtLogin = !next;
+      errorMessage = `Launch-at-login update failed: ${String(error)}`;
+    } finally {
+      launchAtLoginBusy = false;
+    }
+  };
+
+  const onCancelTranscription = async () => {
+    if (status !== 'processing' && status !== 'cancelling') return;
+    try {
+      const requested = await cancelTranscription();
+      if (requested) {
+        status = 'cancelling';
+      }
+    } catch (error) {
+      errorMessage = `Cancel failed: ${String(error)}`;
+    }
+  };
+
+  const checkForUpdates = async (silent = false) => {
+    updaterBusy = true;
+    updaterProgress = null;
+
+    try {
+      const update = await check();
+      pendingUpdate = update;
+      if (update) {
+        updaterMessage = `Update ${update.version} is available.`;
+        if (!silent) {
+          setNotice(updaterMessage);
+        }
+      } else if (!silent) {
+        updaterMessage = 'Murmur is up to date.';
+      }
+    } catch (error) {
+      if (!silent) {
+        errorMessage = `Update check failed: ${String(error)}`;
+      }
+    } finally {
+      updaterBusy = false;
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!pendingUpdate) return;
+
+    updaterBusy = true;
+    updaterProgress = 0;
+    errorMessage = '';
+
+    let total = 0;
+    let downloaded = 0;
+    const updateToInstall = pendingUpdate;
+
+    try {
+      await updateToInstall.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength ?? 0;
+          downloaded = 0;
+          updaterProgress = 0;
+        } else if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          if (total > 0) {
+            updaterProgress = Math.min(100, Math.round((downloaded / total) * 100));
+          }
+        } else {
+          updaterProgress = 100;
+        }
+      });
+
+      updaterMessage = 'Update installed. Restarting...';
+      await relaunch();
+    } catch (error) {
+      errorMessage = `Update install failed: ${String(error)}`;
+    } finally {
+      updaterBusy = false;
+      updaterProgress = null;
+      pendingUpdate = null;
     }
   };
 
@@ -356,6 +461,7 @@
   const statusLabel = (current: AppStatus): string => {
     if (current === 'recording') return 'Recording';
     if (current === 'processing') return 'Transcribing';
+    if (current === 'cancelling') return 'Cancelling';
     return 'Idle';
   };
 
@@ -378,20 +484,24 @@
 
     const setup = async () => {
       try {
-        const [nextStatus, nextHotkey, nextAutoCopy, nextAudioStatus] = await Promise.all([
+        const [nextStatus, nextHotkey, nextAutoCopy, nextAudioStatus, nextLaunchAtLogin] =
+          await Promise.all([
           getAppState(),
           getHotkey(),
           getAutoCopy(),
-          getAudioInputStatus()
+          getAudioInputStatus(),
+          isEnabled()
         ]);
         status = nextStatus;
         hotkey = nextHotkey;
         autoCopy = nextAutoCopy;
         audioStatus = nextAudioStatus;
+        launchAtLogin = nextLaunchAtLogin;
         if (!nextAudioStatus.ok && nextAudioStatus.message) {
           setNotice(nextAudioStatus.message);
         }
         await Promise.all([refreshHistory(), refreshModels()]);
+        void checkForUpdates(true);
       } catch (error) {
         errorMessage = String(error);
         return;
@@ -420,6 +530,10 @@
           }
         }
       );
+
+      const unlistenCancelled = await listen('transcription-cancelled', () => {
+        status = 'idle';
+      });
 
       const unlistenError = await listen<ErrorPayload>('transcription-error', (event) => {
         status = 'idle';
@@ -473,6 +587,7 @@
         unlistenStarted();
         unlistenStopped();
         unlistenCompleted();
+        unlistenCancelled();
         unlistenError();
         unlistenModelProgress();
         unlistenModelComplete();
@@ -509,19 +624,29 @@
     <!-- Record -->
     <div class="record-section">
       <button
-        class={`record-btn${status === 'recording' ? ' is-recording' : ''}${status === 'processing' ? ' is-processing' : ''}`}
+        class={`record-btn${status === 'recording' ? ' is-recording' : ''}${status === 'processing' || status === 'cancelling' ? ' is-processing' : ''}`}
         on:click={onToggle}
-        disabled={busy || modelBusy || status === 'processing'}
+        disabled={busy || modelBusy || status === 'processing' || status === 'cancelling'}
       >
         <span class="btn-dot"></span>
         {#if status === 'recording'}
           Stop Recording
         {:else if status === 'processing'}
           Transcribing…
+        {:else if status === 'cancelling'}
+          Cancelling…
         {:else}
           Start Recording
         {/if}
       </button>
+
+      {#if status === 'processing' || status === 'cancelling'}
+        <div class="cancel-row">
+          <button class="btn-secondary" on:click={onCancelTranscription} disabled={status === 'cancelling'}>
+            {status === 'cancelling' ? 'Cancelling…' : 'Cancel Transcription'}
+          </button>
+        </div>
+      {/if}
 
       <div class="hotkey-row">
         {#each hotkeyTokens as token}
@@ -550,6 +675,17 @@
             disabled={autoCopyBusy}
           />
           <span>Auto-copy transcripts</span>
+        </label>
+      </div>
+      <div class="auto-copy-row">
+        <label class="checkbox-row">
+          <input
+            type="checkbox"
+            checked={launchAtLogin}
+            on:change={onLaunchAtLoginToggle}
+            disabled={launchAtLoginBusy}
+          />
+          <span>Launch at login</span>
         </label>
       </div>
       {#if audioStatus?.default_input}
@@ -586,6 +722,31 @@
         <p class="model-caption">
           {activeModelInfo.label} · {activeModelInfo.quality}{#if !activeModelInfo.installed} · <em>not installed</em>{/if}
         </p>
+      {/if}
+    </div>
+
+    <div class="sep"></div>
+
+    <!-- Updater -->
+    <div class="form-section">
+      <div class="section-header">
+        <span class="section-label">Updates</span>
+      </div>
+      <div class="action-row updater-row">
+        <button class="btn-secondary" on:click={() => checkForUpdates(false)} disabled={updaterBusy}>
+          {updaterBusy ? 'Checking…' : 'Check for updates'}
+        </button>
+        {#if pendingUpdate}
+          <button class="btn-primary" on:click={installUpdate} disabled={updaterBusy}>
+            Install {pendingUpdate.version}
+          </button>
+        {/if}
+      </div>
+      {#if updaterMessage}
+        <p class="model-caption">{updaterMessage}</p>
+      {/if}
+      {#if updaterProgress !== null}
+        <progress max="100" value={updaterProgress}></progress>
       {/if}
     </div>
 
