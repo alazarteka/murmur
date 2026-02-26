@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperError};
 
 pub fn transcribe(
     model_path: &Path,
@@ -10,6 +10,8 @@ pub fn transcribe(
     sample_rate: u32,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String> {
+    const MIN_AUDIO_SAMPLES_16K: usize = 3_200; // 200ms at 16kHz
+
     if input.is_empty() {
         return Ok(String::new());
     }
@@ -23,6 +25,10 @@ pub fn transcribe(
 
     let audio_16k = resample_to_16k(input, sample_rate);
     if audio_16k.is_empty() {
+        return Ok(String::new());
+    }
+    if audio_16k.len() < MIN_AUDIO_SAMPLES_16K {
+        // Very short captures often fail inside whisper with a generic error.
         return Ok(String::new());
     }
 
@@ -53,7 +59,14 @@ pub fn transcribe(
         params.set_abort_callback_safe(move || cancel_flag.load(Ordering::Relaxed));
     }
 
-    state.full(params, &audio_16k)?;
+    match state.full(params, &audio_16k) {
+        Ok(_) => {}
+        Err(WhisperError::GenericError(-6)) => {
+            // Treat known short/silent decode failures as no-speech.
+            return Ok(String::new());
+        }
+        Err(err) => return Err(err.into()),
+    }
 
     let mut text = String::new();
     let n_segments = state.full_n_segments()?;

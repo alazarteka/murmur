@@ -144,6 +144,38 @@ jobs:
           cd src-tauri/target/release/bundle/macos
           ditto -c -k --sequesterRsrc --keepParent Murmur.app Murmur.app.zip
 
+      - name: Generate updater manifest
+        run: |
+          set -euo pipefail
+          SIG_FILE="src-tauri/target/release/bundle/macos/Murmur.app.tar.gz.sig"
+          if [ ! -f "$SIG_FILE" ]; then
+            echo "::error::Updater signature file not found: $SIG_FILE"
+            exit 1
+          fi
+
+          SIGNATURE="$(tr -d '\n' < "$SIG_FILE")"
+          PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          UPDATE_URL="https://github.com/alazarteka/murmur/releases/download/main-latest/Murmur.app.tar.gz"
+          NOTES="Automated build from main at commit ${GITHUB_SHA}."
+
+          cat > src-tauri/target/release/bundle/macos/latest.json <<EOF
+          {
+            "version": "${APP_VERSION}",
+            "notes": "${NOTES}",
+            "pub_date": "${PUBLISHED_AT}",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${SIGNATURE}",
+                "url": "${UPDATE_URL}"
+              },
+              "darwin-aarch64-app": {
+                "signature": "${SIGNATURE}",
+                "url": "${UPDATE_URL}"
+              }
+            }
+          }
+          EOF
+
       - name: Move rolling tag to latest main
         run: |
           git config user.name "github-actions[bot]"
@@ -179,6 +211,7 @@ jobs:
           files=(
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/Murmur.app.zip
+            src-tauri/target/release/bundle/macos/latest.json
             src-tauri/target/release/bundle/macos/*.tar.gz
             src-tauri/target/release/bundle/macos/*.sig
           )

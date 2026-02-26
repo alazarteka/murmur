@@ -168,9 +168,13 @@ fn toggle_window(app: &AppHandle) {
 
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        let _ = window.set_visible_on_all_workspaces(true);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        #[cfg(target_os = "macos")]
+        let _ = window.set_visible_on_all_workspaces(false);
     }
 }
 
