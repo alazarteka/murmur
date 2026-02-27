@@ -489,42 +489,87 @@
     let cleanup = () => {};
 
     const setup = async () => {
-      try {
-        const [nextStatus, nextHotkey, nextAutoCopy, nextAudioStatus, nextLaunchAtLogin] =
-          await Promise.all([
-          getAppState(),
-          getHotkey(),
-          getAutoCopy(),
-          getAudioInputStatus(),
-          isEnabled()
-        ]);
-        status = nextStatus;
-        hotkey = nextHotkey;
-        autoCopy = nextAutoCopy;
-        audioStatus = nextAudioStatus;
-        launchAtLogin = nextLaunchAtLogin;
-        if (!nextAudioStatus.ok && nextAudioStatus.message) {
-          setNotice(nextAudioStatus.message);
-        }
-        await Promise.all([refreshHistory(), refreshModels()]);
-        void checkForUpdates(true);
-      } catch (error) {
-        errorMessage = String(error);
-        return;
+      const startupWarnings: string[] = [];
+
+      const [
+        nextStatusResult,
+        nextHotkeyResult,
+        nextAutoCopyResult,
+        nextAudioStatusResult,
+        nextLaunchAtLoginResult
+      ] = await Promise.allSettled([
+        getAppState(),
+        getHotkey(),
+        getAutoCopy(),
+        getAudioInputStatus(),
+        isEnabled()
+      ]);
+
+      if (nextStatusResult.status === 'fulfilled') {
+        status = nextStatusResult.value;
+      } else {
+        startupWarnings.push(`App state init failed: ${String(nextStatusResult.reason)}`);
       }
 
-      const unlistenStarted = await listen('recording-started', () => {
-        status = 'recording';
-        errorMessage = '';
-      });
+      if (nextHotkeyResult.status === 'fulfilled') {
+        hotkey = nextHotkeyResult.value;
+      } else {
+        startupWarnings.push(`Hotkey init failed: ${String(nextHotkeyResult.reason)}`);
+      }
 
-      const unlistenStopped = await listen('recording-stopped', () => {
-        status = 'processing';
-      });
+      if (nextAutoCopyResult.status === 'fulfilled') {
+        autoCopy = nextAutoCopyResult.value;
+      } else {
+        startupWarnings.push(`Auto-copy init failed: ${String(nextAutoCopyResult.reason)}`);
+      }
 
-      const unlistenCompleted = await listen<TranscriptionCompletePayload>(
-        'transcription-complete',
-        async (event) => {
+      if (nextAudioStatusResult.status === 'fulfilled') {
+        audioStatus = nextAudioStatusResult.value;
+        if (!nextAudioStatusResult.value.ok && nextAudioStatusResult.value.message) {
+          setNotice(nextAudioStatusResult.value.message);
+        }
+      } else {
+        startupWarnings.push(`Audio status init failed: ${String(nextAudioStatusResult.reason)}`);
+      }
+
+      if (nextLaunchAtLoginResult.status === 'fulfilled') {
+        launchAtLogin = nextLaunchAtLoginResult.value;
+      } else {
+        startupWarnings.push(
+          `Launch-at-login init failed: ${String(nextLaunchAtLoginResult.reason)}`
+        );
+      }
+
+      await Promise.all([refreshHistory(), refreshModels()]);
+      void checkForUpdates(true);
+
+      const listeners: Array<() => void> = [];
+      const registerListener = async (
+        label: string,
+        register: () => Promise<() => void>
+      ): Promise<void> => {
+        try {
+          listeners.push(await register());
+        } catch (error) {
+          startupWarnings.push(`${label} listener failed: ${String(error)}`);
+        }
+      };
+
+      await registerListener('recording-started', () =>
+        listen('recording-started', () => {
+          status = 'recording';
+          errorMessage = '';
+        })
+      );
+
+      await registerListener('recording-stopped', () =>
+        listen('recording-stopped', () => {
+          status = 'processing';
+        })
+      );
+
+      await registerListener('transcription-complete', () =>
+        listen<TranscriptionCompletePayload>('transcription-complete', async (event) => {
           status = 'idle';
           resultText = event.payload.text;
           copiedState = event.payload.auto_copied ? 'Copied' : '';
@@ -534,30 +579,32 @@
               copiedState = '';
             }, 1200);
           }
-        }
+        })
       );
 
-      const unlistenCancelled = await listen('transcription-cancelled', () => {
-        status = 'idle';
-      });
+      await registerListener('transcription-cancelled', () =>
+        listen('transcription-cancelled', () => {
+          status = 'idle';
+        })
+      );
 
-      const unlistenError = await listen<ErrorPayload>('transcription-error', (event) => {
-        status = 'idle';
-        errorMessage = event.payload.message;
-      });
+      await registerListener('transcription-error', () =>
+        listen<ErrorPayload>('transcription-error', (event) => {
+          status = 'idle';
+          errorMessage = event.payload.message;
+        })
+      );
 
-      const unlistenModelProgress = await listen<{ file_name: string; percent: number }>(
-        'model-download-progress',
-        (event) => {
+      await registerListener('model-download-progress', () =>
+        listen<{ file_name: string; percent: number }>('model-download-progress', (event) => {
           modelBusy = true;
           downloadingModel = event.payload.file_name;
           downloadPercent = event.payload.percent;
-        }
+        })
       );
 
-      const unlistenModelComplete = await listen<{ file_name: string }>(
-        'model-download-complete',
-        async (event) => {
+      await registerListener('model-download-complete', () =>
+        listen<{ file_name: string }>('model-download-complete', async (event) => {
           modelBusy = false;
           downloadingModel = event.payload.file_name;
           downloadPercent = 100;
@@ -566,23 +613,26 @@
             downloadPercent = null;
             downloadingModel = '';
           }, 1200);
-        }
+        })
       );
 
-      const unlistenHotkeyUpdated = await listen<{ hotkey: string }>('hotkey-updated', (event) => {
-        hotkey = event.payload.hotkey;
-      });
+      await registerListener('hotkey-updated', () =>
+        listen<{ hotkey: string }>('hotkey-updated', (event) => {
+          hotkey = event.payload.hotkey;
+        })
+      );
 
-      const unlistenAutoCopyUpdated = await listen<{ auto_copy: boolean }>(
-        'auto-copy-updated',
-        (event) => {
+      await registerListener('auto-copy-updated', () =>
+        listen<{ auto_copy: boolean }>('auto-copy-updated', (event) => {
           autoCopy = event.payload.auto_copy;
-        }
+        })
       );
 
-      const unlistenNotice = await listen<NoticePayload>('app-notice', (event) => {
-        setNotice(event.payload.message);
-      });
+      await registerListener('app-notice', () =>
+        listen<NoticePayload>('app-notice', (event) => {
+          setNotice(event.payload.message);
+        })
+      );
 
       cleanup = () => {
         stopHotkeyCapture();
@@ -590,17 +640,14 @@
           window.clearTimeout(noticeTimer);
           noticeTimer = null;
         }
-        unlistenStarted();
-        unlistenStopped();
-        unlistenCompleted();
-        unlistenCancelled();
-        unlistenError();
-        unlistenModelProgress();
-        unlistenModelComplete();
-        unlistenHotkeyUpdated();
-        unlistenAutoCopyUpdated();
-        unlistenNotice();
+        for (const unlisten of listeners) {
+          unlisten();
+        }
       };
+
+      if (startupWarnings.length > 0 && !errorMessage) {
+        errorMessage = startupWarnings[0];
+      }
     };
 
     void setup();
