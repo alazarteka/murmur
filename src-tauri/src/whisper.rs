@@ -9,14 +9,7 @@ use whisper_rs::{
 #[derive(Debug, Clone, Copy)]
 struct SignalStats {
     rms: f32,
-    peak: f32,
     active_ratio: f32,
-}
-
-impl SignalStats {
-    fn is_effectively_silent(self) -> bool {
-        self.rms < 0.0025 || (self.peak < 0.02 && self.active_ratio < 0.01)
-    }
 }
 
 pub fn transcribe(
@@ -48,9 +41,6 @@ pub fn transcribe(
     }
 
     let signal = analyze_signal(&audio_16k);
-    if signal.is_effectively_silent() {
-        return Ok(String::new());
-    }
 
     let model_path_str = model_path.to_string_lossy();
     let ctx = WhisperContext::new_with_params(
@@ -86,7 +76,7 @@ pub fn transcribe(
     params.set_temperature(0.0);
     params.set_temperature_inc(0.0);
     params.set_entropy_thold(2.4);
-    params.set_logprob_thold(-0.9);
+    params.set_logprob_thold(-1.0);
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);
@@ -149,18 +139,15 @@ fn analyze_signal(samples: &[f32]) -> SignalStats {
     if samples.is_empty() {
         return SignalStats {
             rms: 0.0,
-            peak: 0.0,
             active_ratio: 0.0,
         };
     }
 
     let mut sum_sq = 0.0_f64;
-    let mut peak = 0.0_f32;
     let mut active_count = 0_usize;
 
     for &s in samples {
         let abs = s.abs();
-        peak = peak.max(abs);
         if abs > 0.01 {
             active_count += 1;
         }
@@ -169,7 +156,6 @@ fn analyze_signal(samples: &[f32]) -> SignalStats {
 
     SignalStats {
         rms: (sum_sq / samples.len() as f64).sqrt() as f32,
-        peak,
         active_ratio: active_count as f32 / samples.len() as f32,
     }
 }
@@ -202,10 +188,11 @@ fn is_likely_hallucination(text: &str, signal: SignalStats, avg_token_prob: f32)
         return false;
     }
 
-    signal.is_effectively_silent()
-        || signal.active_ratio < 0.02
-        || signal.rms < 0.006
-        || avg_token_prob < 0.45
+    // Only suppress short canned outputs when the captured signal itself is very weak
+    // or confidence is especially poor.
+    signal.rms < 0.0012
+        || signal.active_ratio < 0.004
+        || (signal.rms < 0.003 && avg_token_prob < 0.30)
 }
 
 fn resample_to_16k(input: &[f32], source_rate: u32) -> Vec<f32> {
