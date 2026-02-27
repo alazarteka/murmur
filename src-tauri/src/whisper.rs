@@ -6,6 +6,19 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperError,
 };
 
+#[derive(Clone, Copy)]
+enum LanguageMode {
+    English,
+    AutoDetect,
+}
+
+#[derive(Clone, Copy)]
+struct DecodeAttempt {
+    language: LanguageMode,
+    best_of: i32,
+    threads: i32,
+}
+
 pub fn transcribe(
     model_path: &Path,
     input: &[f32],
@@ -25,7 +38,7 @@ pub fn transcribe(
         ));
     }
 
-    let audio_16k = resample_to_16k(input, sample_rate);
+    let audio_16k = preprocess_audio(&resample_to_16k(input, sample_rate));
     if audio_16k.is_empty() {
         return Ok(String::new());
     }
@@ -40,16 +53,74 @@ pub fn transcribe(
         WhisperContextParameters::default(),
     )?;
 
-    let mut state = ctx.create_state()?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 2 });
-
     let threads = std::thread::available_parallelism()
-        .map(|n| n.get().clamp(2, 8) as i32)
+        .map(|n| n.get().clamp(1, 6) as i32)
         .unwrap_or(4);
 
-    params.set_n_threads(threads);
+    // Retry with progressively simpler decode settings when whisper returns
+    // known transient decode failures (notably -7 on some systems/models).
+    let attempts = [
+        DecodeAttempt {
+            language: LanguageMode::English,
+            best_of: 2,
+            threads,
+        },
+        DecodeAttempt {
+            language: LanguageMode::English,
+            best_of: 1,
+            threads: threads.clamp(1, 3),
+        },
+        DecodeAttempt {
+            language: LanguageMode::AutoDetect,
+            best_of: 1,
+            threads: threads.clamp(1, 3),
+        },
+    ];
+
+    let mut saw_recoverable_decode_error = false;
+    for attempt in attempts {
+        match decode_once(&ctx, &audio_16k, cancel_flag.clone(), attempt) {
+            Ok(text) => {
+                if !text.trim().is_empty() {
+                    return Ok(text);
+                }
+            }
+            Err(WhisperError::GenericError(-6)) | Err(WhisperError::GenericError(-7)) => {
+                saw_recoverable_decode_error = true;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    if saw_recoverable_decode_error {
+        eprintln!("whisper: decode produced recoverable errors (-6/-7) across all attempts");
+    }
+
+    Ok(String::new())
+}
+
+fn decode_once(
+    ctx: &WhisperContext,
+    audio_16k: &[f32],
+    cancel_flag: Option<Arc<AtomicBool>>,
+    attempt: DecodeAttempt,
+) -> std::result::Result<String, WhisperError> {
+    let mut state = ctx.create_state()?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy {
+        best_of: attempt.best_of,
+    });
+
+    params.set_n_threads(attempt.threads);
     params.set_translate(false);
-    params.set_language(Some("en"));
+    match attempt.language {
+        LanguageMode::English => {
+            params.set_language(Some("en"));
+        }
+        LanguageMode::AutoDetect => {
+            params.set_language(None);
+            params.set_detect_language(true);
+        }
+    }
     params.set_no_context(true);
     params.set_no_timestamps(true);
     params.set_suppress_blank(true);
@@ -62,14 +133,7 @@ pub fn transcribe(
         params.set_abort_callback_safe(move || cancel_flag.load(Ordering::Relaxed));
     }
 
-    match state.full(params, &audio_16k) {
-        Ok(_) => {}
-        Err(WhisperError::GenericError(-6)) => {
-            // Treat known short/silent decode failures as no-speech.
-            return Ok(String::new());
-        }
-        Err(err) => return Err(err.into()),
-    }
+    state.full(params, audio_16k)?;
 
     let mut text = String::new();
     let n_segments = state.full_n_segments()?;
@@ -87,6 +151,44 @@ pub fn transcribe(
     }
 
     Ok(text)
+}
+
+fn preprocess_audio(samples: &[f32]) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(samples.len());
+    let mut sum_sq = 0.0_f64;
+    let mut finite_count = 0_usize;
+
+    for &sample in samples {
+        let cleaned = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        out.push(cleaned);
+        sum_sq += (cleaned as f64) * (cleaned as f64);
+        finite_count += 1;
+    }
+
+    if finite_count == 0 {
+        return out;
+    }
+
+    // Light automatic gain for very quiet captures to reduce false no-speech.
+    let rms = (sum_sq / finite_count as f64).sqrt() as f32;
+    if rms > 0.0005 && rms < 0.035 {
+        let gain = (0.05 / rms).clamp(1.0, 12.0);
+        if gain > 1.05 {
+            for sample in &mut out {
+                *sample = (*sample * gain).clamp(-1.0, 1.0);
+            }
+        }
+    }
+
+    out
 }
 
 fn resample_to_16k(input: &[f32], source_rate: u32) -> Vec<f32> {
