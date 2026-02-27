@@ -8,6 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
+#[cfg(target_os = "macos")]
+use objc2::runtime::Bool;
+#[cfg(target_os = "macos")]
+use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+
 pub struct RecordingSession {
     stop_tx: mpsc::Sender<()>,
     worker: Option<JoinHandle<()>>,
@@ -80,6 +87,9 @@ pub fn input_status() -> AudioInputStatus {
 }
 
 pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
+    #[cfg(target_os = "macos")]
+    ensure_microphone_permission()?;
+
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -197,6 +207,45 @@ pub fn start_capture(max_seconds: u32) -> Result<RecordingSession> {
             let _ = worker.join();
             Err(anyhow!("Failed to initialize audio thread: {err}"))
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_microphone_permission() -> Result<()> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let media_type = unsafe { AVMediaTypeAudio }
+        .ok_or_else(|| anyhow!("Failed to resolve AVMediaTypeAudio for microphone permission"))?;
+
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
+    match status {
+        AVAuthorizationStatus::Authorized => Ok(()),
+        AVAuthorizationStatus::Restricted => Err(anyhow!(
+            "Microphone access is restricted by system policy."
+        )),
+        AVAuthorizationStatus::Denied => Err(anyhow!(
+            "Microphone access denied. Enable Murmur in System Settings > Privacy & Security > Microphone."
+        )),
+        AVAuthorizationStatus::NotDetermined => {
+            let (tx, rx) = mpsc::channel::<bool>();
+            let handler = RcBlock::new(move |granted: Bool| {
+                let _ = tx.send(granted.as_bool());
+            });
+            unsafe {
+                AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &handler);
+            }
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(anyhow!(
+                    "Microphone access denied. Enable Murmur in System Settings > Privacy & Security > Microphone."
+                )),
+                Err(_) => Err(anyhow!(
+                    "Microphone permission prompt timed out. Open System Settings > Privacy & Security > Microphone and enable Murmur."
+                )),
+            }
+        }
+        _ => Err(anyhow!("Unknown microphone authorization status.")),
     }
 }
 
