@@ -115,10 +115,13 @@
   let updaterMessage = '';
   let updaterProgress: number | null = null;
   let pendingUpdate: Update | null = null;
+  let viewMode: 'main' | 'history' = 'main';
+  let historyListEl: HTMLDivElement | null = null;
 
   $: displayModels = models.length > 0 ? models : FALLBACK_MODELS;
   $: activeModelInfo = displayModels.find((model) => model.file_name === activeModel) ?? null;
   $: hotkeyTokens = formatHotkeyTokens(hotkey);
+  $: isHistoryView = viewMode === 'history';
 
   const modelShortName = (fileName: string): string =>
     fileName.replace(/^ggml-/, '').replace(/\.bin$/, '');
@@ -464,6 +467,14 @@
     }, 1200);
   };
 
+  const toggleHistoryView = () => {
+    const openingHistory = viewMode !== 'history';
+    viewMode = openingHistory ? 'history' : 'main';
+    if (openingHistory) {
+      historyListEl?.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  };
+
   const statusLabel = (current: AppStatus): string => {
     if (current === 'recording') return 'Recording';
     if (current === 'processing') return 'Transcribing';
@@ -663,214 +674,237 @@
       <h1 class="app-name">Murmur</h1>
       <p class="app-sub">Local speech-to-text</p>
     </div>
-    <span class={`status-badge ${status}`}>
-      <span class="status-dot"></span>
-      {statusLabel(status)}
-    </span>
+    <div class="toolbar-actions">
+      <span class={`status-badge ${status}`}>
+        <span class="status-dot"></span>
+        {statusLabel(status)}
+      </span>
+      <button
+        class={`view-toggle${isHistoryView ? ' is-history' : ''}`}
+        type="button"
+        aria-label={isHistoryView ? 'Back to main view' : 'Show recent transcriptions'}
+        title={isHistoryView ? 'Back' : 'Recents'}
+        on:click={toggleHistoryView}
+      >
+        <span class="view-icon icon-recents" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="img" focusable="false">
+            <circle cx="12" cy="12" r="8.5"></circle>
+            <path d="M12 7.7v4.8l3.5 2.1"></path>
+          </svg>
+        </span>
+        <span class="view-icon icon-back" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="img" focusable="false">
+            <path d="M15.5 18l-6-6 6-6"></path>
+          </svg>
+        </span>
+      </button>
+    </div>
   </header>
 
   <div class="sep"></div>
 
   <!-- ── Content ─────────────────────────────────── -->
   <div class="content">
+    <div class={`view-stack${isHistoryView ? ' is-history' : ''}`}>
+      <section class="view-panel main-view" aria-hidden={isHistoryView}>
 
-    <!-- Record -->
-    <div class="record-section">
-      <button
-        class={`record-btn${status === 'recording' ? ' is-recording' : ''}${status === 'processing' || status === 'cancelling' ? ' is-processing' : ''}`}
-        on:click={onToggle}
-        disabled={busy || modelBusy || status === 'processing' || status === 'cancelling'}
-      >
-        <span class="btn-dot"></span>
-        {#if status === 'recording'}
-          Stop Recording
-        {:else if status === 'processing'}
-          Transcribing…
-        {:else if status === 'cancelling'}
-          Cancelling…
-        {:else}
-          Start Recording
-        {/if}
-      </button>
-
-      {#if status === 'processing' || status === 'cancelling'}
-        <div class="cancel-row">
-          <button class="btn-secondary" on:click={onCancelTranscription} disabled={status === 'cancelling'}>
-            {status === 'cancelling' ? 'Cancelling…' : 'Cancel Transcription'}
+        <!-- Record -->
+        <div class="record-section">
+          <button
+            class={`record-btn${status === 'recording' ? ' is-recording' : ''}${status === 'processing' || status === 'cancelling' ? ' is-processing' : ''}`}
+            on:click={onToggle}
+            disabled={busy || modelBusy || status === 'processing' || status === 'cancelling'}
+          >
+            <span class="btn-dot"></span>
+            {#if status === 'recording'}
+              Stop Recording
+            {:else if status === 'processing'}
+              Transcribing…
+            {:else if status === 'cancelling'}
+              Cancelling…
+            {:else}
+              Start Recording
+            {/if}
           </button>
-        </div>
-      {/if}
 
-      <div class="hotkey-row">
-        {#each hotkeyTokens as token}
-          <span class="kbd">{token}</span>
-        {/each}
-        <button
-          class="btn-inline hotkey-change"
-          on:click={startHotkeyCapture}
-          disabled={hotkeyBusy || rebindingHotkey || status !== 'idle'}
-        >
-          {rebindingHotkey ? 'Press keys…' : 'Change'}
-        </button>
-      </div>
-      {#if hotkeyMessage}
-        <p class="hotkey-error">{hotkeyMessage}</p>
-      {:else if rebindingHotkey}
-        <p class="hotkey-hint">Press your new shortcut, or Esc to cancel.</p>
-      {/if}
-
-      <div class="auto-copy-row">
-        <label class="checkbox-row">
-          <input
-            type="checkbox"
-            checked={autoCopy}
-            on:change={onAutoCopyToggle}
-            disabled={autoCopyBusy}
-          />
-          <span>Auto-copy transcripts</span>
-        </label>
-      </div>
-      <div class="auto-copy-row">
-        <label class="checkbox-row">
-          <input
-            type="checkbox"
-            checked={launchAtLogin}
-            on:change={onLaunchAtLoginToggle}
-            disabled={launchAtLoginBusy}
-          />
-          <span>Launch at login</span>
-        </label>
-      </div>
-      {#if audioStatus?.default_input}
-        <p class="audio-hint">
-          Mic: {audioStatus.default_input}
-          {#if audioStatus.default_sample_rate}
-            · {audioStatus.default_sample_rate} Hz
-          {/if}
-        </p>
-      {/if}
-    </div>
-
-    <div class="sep"></div>
-
-    <!-- Model -->
-    <div class="form-section">
-      <label class="field-label" for="model-select">Model</label>
-      <div class="select-wrap">
-        <select
-          id="model-select"
-          value={activeModel}
-          on:change={onModelChange}
-          disabled={modelBusy}
-        >
-          {#each displayModels as model}
-            <option value={model.file_name}>
-              {model.label} — {model.quality}{model.installed ? '' : ' ↓'}
-            </option>
-          {/each}
-        </select>
-        <span class="chevron">▾</span>
-      </div>
-      {#if activeModelInfo}
-        <p class="model-caption">
-          {activeModelInfo.label} · {activeModelInfo.quality}{#if !activeModelInfo.installed} · <em>not installed</em>{/if}
-        </p>
-      {/if}
-    </div>
-
-    <div class="sep"></div>
-
-    <!-- Updater -->
-    <div class="form-section">
-      <div class="section-header">
-        <span class="section-label">Updates</span>
-      </div>
-      <div class="action-row updater-row" class:single={!pendingUpdate}>
-        <button class="btn-secondary" on:click={() => checkForUpdates(false)} disabled={updaterBusy}>
-          {updaterBusy ? 'Checking…' : 'Check for updates'}
-        </button>
-        {#if pendingUpdate}
-          <button class="btn-primary" on:click={installUpdate} disabled={updaterBusy}>
-            Install {pendingUpdate.version}
-          </button>
-        {/if}
-      </div>
-      {#if updaterMessage}
-        <p class="model-caption">{updaterMessage}</p>
-      {/if}
-      {#if updaterProgress !== null}
-        <progress max="100" value={updaterProgress}></progress>
-      {/if}
-    </div>
-
-    <div class="sep"></div>
-
-    <!-- Download progress -->
-    {#if downloadPercent !== null}
-      <div class="notice-band info">
-        <div class="notice-row">
-          <span>Downloading {modelShortName(downloadingModel)}</span>
-          <strong>{downloadPercent}%</strong>
-        </div>
-        <progress max="100" value={downloadPercent}></progress>
-      </div>
-      <div class="sep"></div>
-    {/if}
-
-    {#if noticeMessage}
-      <div class="notice-band info">{noticeMessage}</div>
-      <div class="sep"></div>
-    {/if}
-
-    <!-- Error -->
-    {#if errorMessage}
-      <div class="notice-band error">{errorMessage}</div>
-      <div class="sep"></div>
-    {/if}
-
-    <!-- Result -->
-    <div class="result-section">
-      <div class="section-header">
-        <span class="section-label">Result</span>
-        <span class={`copied-tag${copiedState ? ' show' : ''}`}>✓ Copied</span>
-      </div>
-      <textarea bind:value={resultText} placeholder="Transcribed text appears here…"></textarea>
-      <div class="action-row">
-        <button class="btn-primary" on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
-        <button class="btn-secondary" on:click={onDiscard}>Discard</button>
-      </div>
-    </div>
-
-    <div class="sep"></div>
-
-    <!-- History -->
-    <div class="history-section">
-      <div class="section-header">
-        <span class="section-label">Recent</span>
-        <button class="btn-inline" on:click={refreshHistory}>Refresh</button>
-      </div>
-
-      {#if history.length === 0}
-        <p class="empty-msg">No transcriptions yet.</p>
-      {:else}
-        <div class="history-list">
-          {#each history as item}
-            <div class="history-item">
-              <button class="history-text-btn" on:click={() => onUseHistoryItem(item.text)}>
-                {item.text.slice(0, 180)}
+          {#if status === 'processing' || status === 'cancelling'}
+            <div class="cancel-row">
+              <button class="btn-secondary" on:click={onCancelTranscription} disabled={status === 'cancelling'}>
+                {status === 'cancelling' ? 'Cancelling…' : 'Cancel Transcription'}
               </button>
-              <div class="history-meta-row">
-                <div class="history-meta-info">
-                  <span>{formatTimestamp(item.created_at)}</span>
-                  <span class="dot-sep"></span>
-                  <span>{modelShortName(item.model)}</span>
-                </div>
-                <button class="btn-del" on:click={() => onDelete(item.id)}>✕</button>
-              </div>
             </div>
-          {/each}
+          {/if}
+
+          <div class="hotkey-row">
+            {#each hotkeyTokens as token}
+              <span class="kbd">{token}</span>
+            {/each}
+            <button
+              class="btn-inline hotkey-change"
+              on:click={startHotkeyCapture}
+              disabled={hotkeyBusy || rebindingHotkey || status !== 'idle'}
+            >
+              {rebindingHotkey ? 'Press keys…' : 'Change'}
+            </button>
+          </div>
+          {#if hotkeyMessage}
+            <p class="hotkey-error">{hotkeyMessage}</p>
+          {:else if rebindingHotkey}
+            <p class="hotkey-hint">Press your new shortcut, or Esc to cancel.</p>
+          {/if}
+
+          <div class="auto-copy-row">
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                checked={autoCopy}
+                on:change={onAutoCopyToggle}
+                disabled={autoCopyBusy}
+              />
+              <span>Auto-copy transcripts</span>
+            </label>
+          </div>
+          <div class="auto-copy-row">
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                checked={launchAtLogin}
+                on:change={onLaunchAtLoginToggle}
+                disabled={launchAtLoginBusy}
+              />
+              <span>Launch at login</span>
+            </label>
+          </div>
+          {#if audioStatus?.default_input}
+            <p class="audio-hint">
+              Mic: {audioStatus.default_input}
+              {#if audioStatus.default_sample_rate}
+                · {audioStatus.default_sample_rate} Hz
+              {/if}
+            </p>
+          {/if}
         </div>
-      {/if}
+        <div class="sep"></div>
+
+        <!-- Model -->
+        <div class="form-section">
+          <label class="field-label" for="model-select">Model</label>
+          <div class="select-wrap">
+            <select
+              id="model-select"
+              value={activeModel}
+              on:change={onModelChange}
+              disabled={modelBusy}
+            >
+              {#each displayModels as model}
+                <option value={model.file_name}>
+                  {model.label} — {model.quality}{model.installed ? '' : ' ↓'}
+                </option>
+              {/each}
+            </select>
+            <span class="chevron">▾</span>
+          </div>
+          {#if activeModelInfo}
+            <p class="model-caption">
+              {activeModelInfo.label} · {activeModelInfo.quality}{#if !activeModelInfo.installed} · <em>not installed</em>{/if}
+            </p>
+          {/if}
+        </div>
+
+        <div class="sep"></div>
+
+        <!-- Updater -->
+        <div class="form-section">
+          <div class="section-header">
+            <span class="section-label">Updates</span>
+          </div>
+          <div class="action-row updater-row" class:single={!pendingUpdate}>
+            <button class="btn-secondary" on:click={() => checkForUpdates(false)} disabled={updaterBusy}>
+              {updaterBusy ? 'Checking…' : 'Check for updates'}
+            </button>
+            {#if pendingUpdate}
+              <button class="btn-primary" on:click={installUpdate} disabled={updaterBusy}>
+                Install {pendingUpdate.version}
+              </button>
+            {/if}
+          </div>
+          {#if updaterMessage}
+            <p class="model-caption">{updaterMessage}</p>
+          {/if}
+          {#if updaterProgress !== null}
+            <progress max="100" value={updaterProgress}></progress>
+          {/if}
+        </div>
+
+        <div class="sep"></div>
+
+        <!-- Download progress -->
+        {#if downloadPercent !== null}
+          <div class="notice-band info">
+            <div class="notice-row">
+              <span>Downloading {modelShortName(downloadingModel)}</span>
+              <strong>{downloadPercent}%</strong>
+            </div>
+            <progress max="100" value={downloadPercent}></progress>
+          </div>
+          <div class="sep"></div>
+        {/if}
+
+        {#if noticeMessage}
+          <div class="notice-band info">{noticeMessage}</div>
+          <div class="sep"></div>
+        {/if}
+
+        <!-- Error -->
+        {#if errorMessage}
+          <div class="notice-band error">{errorMessage}</div>
+          <div class="sep"></div>
+        {/if}
+
+        <!-- Result -->
+        <div class="result-section">
+          <div class="section-header">
+            <span class="section-label">Result</span>
+            <span class={`copied-tag${copiedState ? ' show' : ''}`}>✓ Copied</span>
+          </div>
+          <textarea bind:value={resultText} placeholder="Transcribed text appears here…"></textarea>
+          <div class="action-row">
+            <button class="btn-primary" on:click={onCopy} disabled={!resultText.trim()}>Copy</button>
+            <button class="btn-secondary" on:click={onDiscard}>Discard</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="view-panel history-view" aria-hidden={!isHistoryView}>
+        <div class="history-section full-page">
+          <div class="section-header">
+            <span class="section-label">Recent</span>
+            <button class="btn-inline" on:click={refreshHistory}>Refresh</button>
+          </div>
+
+          {#if history.length === 0}
+            <p class="empty-msg">No transcriptions yet.</p>
+          {:else}
+            <div class="history-list" bind:this={historyListEl}>
+              {#each history as item}
+                <div class="history-item">
+                  <button class="history-text-btn" on:click={() => onUseHistoryItem(item.text)}>
+                    {item.text.slice(0, 180)}
+                  </button>
+                  <div class="history-meta-row">
+                    <div class="history-meta-info">
+                      <span>{formatTimestamp(item.created_at)}</span>
+                      <span class="dot-sep"></span>
+                      <span>{modelShortName(item.model)}</span>
+                    </div>
+                    <button class="btn-del" on:click={() => onDelete(item.id)}>✕</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </section>
     </div>
 
   </div>

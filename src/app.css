@@ -56,6 +56,10 @@
 /* ── Base ─────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 
+html, body, #app {
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   background: transparent;
@@ -64,6 +68,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -webkit-user-select: none;
   user-select: none;
+  overflow: hidden;
 }
 
 #app { height: 100vh; }
@@ -77,6 +82,7 @@ body {
   backdrop-filter: blur(48px) saturate(180%);
   -webkit-backdrop-filter: blur(48px) saturate(180%);
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* ── Toolbar ──────────────────────────────────────── */
@@ -101,6 +107,71 @@ body {
   margin: 0;
   font-size: 11px;
   color: var(--label-2);
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.view-toggle {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--fill-2);
+  color: var(--label-2);
+  transition: background-color 0.22s ease, color 0.22s ease, transform 0.22s ease;
+}
+
+.view-toggle:not(:disabled):hover {
+  background: var(--fill-1);
+}
+
+.view-toggle.is-history {
+  background: rgba(0, 122, 255, 0.14);
+  color: var(--blue);
+}
+
+.view-icon {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.view-icon svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+
+.icon-recents {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.icon-back {
+  opacity: 0;
+  transform: scale(0.85) rotate(-10deg);
+}
+
+.view-toggle.is-history .icon-recents {
+  opacity: 0;
+  transform: scale(0.85) rotate(10deg);
+}
+
+.view-toggle.is-history .icon-back {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
 }
 
 /* ── Status Badge ─────────────────────────────────── */
@@ -167,6 +238,47 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.view-stack {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.view-panel {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+}
+
+.main-view {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.history-view {
+  opacity: 0;
+  transform: translateX(8%);
+  pointer-events: none;
+}
+
+.view-stack.is-history .main-view {
+  opacity: 0;
+  transform: translateX(-9%);
+  pointer-events: none;
+}
+
+.view-stack.is-history .history-view {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
 }
 
 /* ── Record Section ───────────────────────────────── */
@@ -533,11 +645,16 @@ button:disabled { opacity: 0.35; cursor: default; }
   padding: 10px 16px 12px;
 }
 
+.history-section.full-page {
+  padding-top: 12px;
+}
+
 .history-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: auto;
   padding-bottom: 2px;
 }
 
