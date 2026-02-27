@@ -484,7 +484,9 @@
 
   const formatTimestamp = (value: string): string => {
     const normalized = value.includes('T') ? value : value.replace(' ', 'T');
-    const parsed = new Date(normalized);
+    const hasZone = /[zZ]$|[+\-]\d{2}:\d{2}$/.test(normalized);
+    const utcAssumed = hasZone ? normalized : `${normalized}Z`;
+    const parsed = new Date(utcAssumed);
     if (Number.isNaN(parsed.getTime())) {
       return value;
     }
