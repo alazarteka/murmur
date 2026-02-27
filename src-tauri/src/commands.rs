@@ -308,6 +308,40 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             return Ok(());
         }
 
+        let signal = audio::analyze_signal(&captured.samples);
+        eprintln!(
+            "capture stats: samples={}, sample_rate={}, rms={:.6}, peak={:.6}, active_ratio={:.4}",
+            captured.samples.len(),
+            captured.sample_rate,
+            signal.rms,
+            signal.peak,
+            signal.active_ratio
+        );
+
+        // If the captured signal is effectively flat, decoding will usually produce empty
+        // output. Surface a direct diagnostic instead of repeatedly showing no-speech.
+        if signal.rms < 0.0008 || (signal.peak < 0.008 && signal.active_ratio < 0.003) {
+            let input_status = audio::input_status();
+            let input_name = input_status
+                .default_input
+                .unwrap_or_else(|| "Unknown input".to_string());
+            emit_error(
+                &app,
+                format!(
+                    "No microphone signal detected. Check Murmur microphone permission in System Settings > Privacy & Security > Microphone, and verify the active input device (current default: {}).",
+                    input_name
+                ),
+            );
+            emit_notice(
+                &app,
+                format!(
+                    "Capture levels were very low (rms {:.5}, peak {:.5}).",
+                    signal.rms, signal.peak
+                ),
+            );
+            return Ok(());
+        }
+
         let db_path = state.db_path();
         let models_dir = state.models_dir();
         let mut model_name = state.active_model_name();
@@ -338,16 +372,40 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             );
         }
 
+        let samples = captured.samples.clone();
+        let sample_rate = captured.sample_rate;
+        let duration_ms = captured.duration_ms;
+        let primary_model_name = model_name.clone();
+        let primary_model_path = model_path.clone();
+        let fallback_model_name = "ggml-base.en.bin".to_string();
+        let fallback_model_path = models_dir.join(&fallback_model_name);
+        let fallback_available = fallback_model_path.exists() && fallback_model_path != primary_model_path;
         let cancel_for_worker = cancel_requested.clone();
         let transcribe_started = Instant::now();
         let transcription = tauri::async_runtime::spawn_blocking(move || {
-            whisper::transcribe(
-                &model_path,
-                &captured.samples,
-                captured.sample_rate,
-                Some(cancel_for_worker),
-            )
-                .map(|text| (text, captured.duration_ms))
+            let mut text = whisper::transcribe(
+                &primary_model_path,
+                &samples,
+                sample_rate,
+                Some(cancel_for_worker.clone()),
+            )?;
+            let mut used_model = primary_model_name;
+
+            if text.trim().is_empty() && fallback_available {
+                if let Ok(fallback_text) = whisper::transcribe(
+                    &fallback_model_path,
+                    &samples,
+                    sample_rate,
+                    Some(cancel_for_worker),
+                ) {
+                    if !fallback_text.trim().is_empty() {
+                        text = fallback_text;
+                        used_model = fallback_model_name;
+                    }
+                }
+            }
+
+            Ok((text, duration_ms, used_model))
         })
         .await?;
         let transcribe_ms = transcribe_started.elapsed().as_millis() as u64;
@@ -358,7 +416,7 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
             return Ok(());
         }
 
-        let (text, duration_ms) = match transcription {
+        let (text, duration_ms, used_model_name) = match transcription {
             Ok(value) => value,
             Err(err) => {
                 if cancel_requested.load(Ordering::Relaxed) {
@@ -369,6 +427,18 @@ async fn stop_recording_impl(app: AppHandle, state: SharedState) -> Result<()> {
                 return Err(err);
             }
         };
+
+        if used_model_name != model_name {
+            emit_notice(
+                &app,
+                format!(
+                    "Active model '{}' returned no text; used '{}' as fallback for this transcription.",
+                    model_name, used_model_name
+                ),
+            );
+            model_name = used_model_name;
+        }
+
         let normalized = if text.trim().is_empty() {
             "(No speech detected)".to_string()
         } else {

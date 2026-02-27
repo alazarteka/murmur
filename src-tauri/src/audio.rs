@@ -24,6 +24,13 @@ pub struct CapturedAudio {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CaptureSignalStats {
+    pub rms: f32,
+    pub peak: f32,
+    pub active_ratio: f32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AudioInputStatus {
     pub available_inputs: usize,
@@ -211,6 +218,35 @@ pub fn stop_capture(mut session: RecordingSession) -> CapturedAudio {
         sample_rate: session.sample_rate,
         duration_ms,
         truncated,
+    }
+}
+
+pub fn analyze_signal(samples: &[f32]) -> CaptureSignalStats {
+    if samples.is_empty() {
+        return CaptureSignalStats {
+            rms: 0.0,
+            peak: 0.0,
+            active_ratio: 0.0,
+        };
+    }
+
+    let mut sum_sq = 0.0_f64;
+    let mut peak = 0.0_f32;
+    let mut active = 0_usize;
+
+    for &sample in samples {
+        let abs = sample.abs();
+        peak = peak.max(abs);
+        if abs > 0.01 {
+            active += 1;
+        }
+        sum_sq += (sample as f64) * (sample as f64);
+    }
+
+    CaptureSignalStats {
+        rms: (sum_sq / samples.len() as f64).sqrt() as f32,
+        peak,
+        active_ratio: active as f32 / samples.len() as f32,
     }
 }
 
