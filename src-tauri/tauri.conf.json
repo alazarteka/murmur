@@ -53,6 +53,7 @@
       "icons/icon.png"
     ],
     "macOS": {
+      "entitlements": "entitlements.macos.plist",
       "infoPlist": "Info.plist"
     }
   }

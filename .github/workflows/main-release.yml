@@ -157,6 +157,17 @@ jobs:
             exit 1
           fi
 
+      - name: Verify microphone entitlement is present
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Murmur.app"
+          ENTITLEMENTS="$(codesign -d --entitlements :- "$APP_PATH" 2>/dev/null || true)"
+          echo "$ENTITLEMENTS"
+
+          if ! echo "$ENTITLEMENTS" | grep -q "com.apple.security.device.audio-input"; then
+            echo "::error::Missing microphone entitlement (com.apple.security.device.audio-input)."
+            exit 1
+          fi
+
       - name: Zip app bundle
         run: |
           cd src-tauri/target/release/bundle/macos
