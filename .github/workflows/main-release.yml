@@ -58,6 +58,19 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Apple code-signing secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "${APPLE_CERTIFICATE}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD}" ] || [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
+            echo "::error::Missing Apple signing secrets."
+            echo "::error::Required: APPLE_CERTIFICATE (base64 p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY."
+            echo "::error::Current builds would be ad-hoc signed and may fail microphone permission (TCC)."
+            exit 1
+          fi
+
       - name: Set CI release version
         run: |
           APP_VERSION="0.1.${GITHUB_RUN_NUMBER}"
@@ -87,11 +100,6 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -z "${APPLE_CERTIFICATE}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD}" ]; then
-            echo "Skipping Apple signing certificate import (secrets not set)."
-            exit 0
-          fi
-
           CERT_PATH="$RUNNER_TEMP/build_certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD="$(uuidgen)"
@@ -104,10 +112,6 @@ jobs:
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          if [ -z "${APPLE_SIGNING_IDENTITY}" ]; then
-            APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | head -n 1 | sed -E 's/.*\"([^\"]+)\".*/\1/')"
-          fi
 
           echo "APPLE_SIGNING_IDENTITY=${APPLE_SIGNING_IDENTITY}" >> "$GITHUB_ENV"
 
@@ -134,10 +138,24 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         run: |
-          SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
-          echo "Using Apple signing identity: ${SIGN_IDENTITY}"
+          echo "Using Apple signing identity: ${APPLE_SIGNING_IDENTITY}"
           unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
-          APPLE_SIGNING_IDENTITY="${SIGN_IDENTITY}" npx tauri build --config src-tauri/tauri.release.conf.json
+          APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY}" npx tauri build --config src-tauri/tauri.release.conf.json
+
+      - name: Verify app is not ad-hoc signed
+        run: |
+          APP_PATH="src-tauri/target/release/bundle/macos/Murmur.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "::error::Expected app bundle not found at $APP_PATH"
+            exit 1
+          fi
+
+          CODESIGN_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
+          echo "$CODESIGN_INFO"
+          if echo "$CODESIGN_INFO" | grep -q "Signature=adhoc"; then
+            echo "::error::App is ad-hoc signed; refusing to publish release."
+            exit 1
+          fi
 
       - name: Zip app bundle
         run: |
