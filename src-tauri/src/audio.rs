@@ -368,7 +368,39 @@ fn append_mono<T, F>(
             truncated.store(true, Ordering::Relaxed);
             break;
         }
-        let sum: f32 = frame.iter().map(|v| convert(*v)).sum();
-        out.push(sum / channels as f32);
+
+        // Prefer channel 0 over averaging all channels. Some multi-mic arrays can
+        // expose phase-shifted channels, and averaging can attenuate voice signal
+        // enough for whisper to return empty output.
+        if let Some(&sample) = frame.first() {
+            out.push(convert(sample));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_mono_uses_first_channel() {
+        let truncated = Arc::new(AtomicBool::new(false));
+        let mut out = Vec::new();
+        let data = [0.6_f32, -0.6_f32, 0.3_f32, -0.3_f32];
+        append_mono(&data, 2, 10, &truncated, &mut out, |s| s);
+
+        assert_eq!(out, vec![0.6, 0.3]);
+        assert!(!truncated.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn append_mono_respects_capacity() {
+        let truncated = Arc::new(AtomicBool::new(false));
+        let mut out = Vec::new();
+        let data = [0.1_f32, 0.2_f32, 0.3_f32];
+        append_mono(&data, 1, 2, &truncated, &mut out, |s| s);
+
+        assert_eq!(out, vec![0.1, 0.2]);
+        assert!(truncated.load(Ordering::Relaxed));
     }
 }
